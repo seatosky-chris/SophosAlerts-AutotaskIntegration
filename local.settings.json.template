@@ -1,0 +1,26 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+
+    "AUTOTASK_INTEGRATION_CODE": "",
+    "AUTOTASK_USER": "",
+    "AUTOTASK_SECRET": "",
+
+    "SOPHOS_CLIENT_ID": "",
+    "SOPHOS_SECRET": "",
+    
+    "EMAIL_API_ENDPOINT": "",
+    "EMAIL_API_KEY": "",
+    "EMAIL_FROM__Email": "",
+    "EMAIL_FROM__Name": "",
+    "EMAIL_TO__Email": "",
+    "EMAIL_TO__Name": "",
+
+    "TICKET_QueueID" : "",
+    "TICKET_IssueType": "",
+    "TICKET_SubIssueType": "",
+    "TICKET_ServiceLevelAgreementID": ""
+  }
+}

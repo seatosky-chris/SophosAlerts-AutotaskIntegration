@@ -8,10 +8,22 @@ module.exports = async function (context, myTimer) {
     var timeStamp = new Date().toISOString();
     var lastRun = false
     var lastRunUnixTimestamp = false;
+    var lastRunDir = null;
+
+
+    if (fs.existsSync("C:/home/data")) {
+        // linux / live azure function
+        context.log("Using lastRun in C:/home/data");
+        lastRunDir = "C:/home/data/lastRun.dat";
+    } else {
+        // windows
+        context.log("Using local lastRun file");
+        lastRunDir = "lastRun.dat";
+    }
 
     try {
-        await fs.promises.access("lastRun.dat");
-        lastRun = new Date(fs.readFileSync('lastRun.dat', 'utf-8'));
+        await fs.promises.access(lastRunDir);
+        lastRun = new Date(fs.readFileSync(lastRunDir, 'utf-8'));
     } catch (error) {
         // New run
         context.log.warn("This script has never been ran before.");
@@ -126,7 +138,7 @@ module.exports = async function (context, myTimer) {
         }
     }
    
-    fs.writeFile('lastRun.dat', timeStamp, function(err) {
+    fs.writeFile(lastRunDir, timeStamp, function(err) {
         if (err) throw err;
     });
 

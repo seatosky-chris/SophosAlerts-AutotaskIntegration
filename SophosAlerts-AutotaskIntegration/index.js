@@ -355,7 +355,9 @@ async function getAutotaskContractID(autotaskAPI, autotaskID) {
         includeFields: [ "id" ]
     });
     
-    contractID = contract.items[0].id
+    if (contract && contract.items.length > 0) {
+        contractID = contract.items[0].id
+    }
     return contractID;
 }
 
@@ -431,7 +433,9 @@ async function getAutotaskDevice(autotaskAPI, autotaskID, deviceDetails) {
         }
     }
 
-    deviceID = device.items[0].id;
+    if (device && device.length > 0) {
+        deviceID = device.items[0].id;
+    }
     return deviceID;
 }
 

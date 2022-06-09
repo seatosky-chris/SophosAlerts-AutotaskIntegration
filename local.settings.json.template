@@ -21,6 +21,8 @@
     "TICKET_QueueID" : "",
     "TICKET_IssueType": "",
     "TICKET_SubIssueType": "",
-    "TICKET_ServiceLevelAgreementID": ""
+    "TICKET_ServiceLevelAgreementID": "",
+
+    "HOW_TO_DOCUMENTATION_LINK": ""
   }
 }

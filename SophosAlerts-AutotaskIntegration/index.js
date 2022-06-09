@@ -116,6 +116,9 @@ module.exports = async function (context, myTimer) {
                             }
                             description += `\nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
 
+                            if (process.env.HOW_TO_DOCUMENTATION_LINK) {
+                                description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
+                            }
                             
                             // Make a new ticket
                             let newTicket = {

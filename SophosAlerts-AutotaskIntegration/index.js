@@ -110,7 +110,12 @@ module.exports = async function (context, myTimer) {
                                 title = title + ` on "${alert.location}"`;
                             }
                             var when = new Date(alert.when);
-                            var description = `${alert.description} \nSeverity: ${alert.severity} \nDevice: ${alert.location} \nIP: ${alert.data.source_info.ip} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
+                            var description = `${alert.description} \nSeverity: ${alert.severity} \nDevice: ${alert.location}`;
+                            if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
+                                description += `\nIP: ${alert.data.source_info.ip}`;
+                            }
+                            description += `\nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
+
                             
                             // Make a new ticket
                             let newTicket = {
@@ -138,9 +143,14 @@ module.exports = async function (context, myTimer) {
         }
     }
    
-    fs.writeFile(lastRunDir, timeStamp, function(err) {
-        if (err) throw err;
-    });
+    try {
+        fs.writeFile(lastRunDir, timeStamp, function(err) {
+            if (err) throw err;
+        });
+        context.log("Updated lastRun.dat to: " + timeStamp);
+    } catch (error) {
+        context.log.error("Could not update lastRun.dat: " + error);
+    }
 
     context.log('JavaScript timer trigger function ran!', timeStamp);
 };

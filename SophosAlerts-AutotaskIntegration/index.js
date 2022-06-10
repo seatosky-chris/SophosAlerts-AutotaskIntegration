@@ -142,17 +142,17 @@ module.exports = async function (context, myTimer) {
                         };
                     }
                 }
+
+                try {
+                    fs.writeFile(lastRunDir, timeStamp, function(err) {
+                        if (err) throw err;
+                    });
+                    context.log("Updated lastRun.dat to: " + timeStamp);
+                } catch (error) {
+                    context.log.error("Could not update lastRun.dat: " + error);
+                }
             }
         }
-    }
-   
-    try {
-        fs.writeFile(lastRunDir, timeStamp, function(err) {
-            if (err) throw err;
-        });
-        context.log("Updated lastRun.dat to: " + timeStamp);
-    } catch (error) {
-        context.log.error("Could not update lastRun.dat: " + error);
     }
 
     context.log('JavaScript timer trigger function ran!', timeStamp);
@@ -183,6 +183,7 @@ async function getSophosToken(context) {
         return await sophosToken.json();
     } catch (error) {
         context.log.error(error);
+        return null;
     }
 }
 
@@ -200,6 +201,7 @@ async function getSophosPartnerID(context, token) {
         return sophosPartnerInfoJson.id;
     } catch (error) {
         context.log.error(error);
+        return null;
     }
 }
 

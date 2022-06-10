@@ -1,0 +1,11 @@
+{
+	"Event::Endpoint::SavEnabled": "Event::Endpoint::SavDisabled",
+	"Event::Endpoint::ServiceRestored": "Event::Endpoint::ServiceNotRunning",
+	"Event::Endpoint::HeartbeatRestored": "Event::Endpoint::HeartbeatMissing",
+	"Event::Firewall::FirewallGatewayUp": "Event::Firewall::FirewallGatewayDown",
+	"Event::Firewall::FirewallHAStateRestored": "Event::Firewall::FirewallHAStateDegraded",
+	"Event::Firewall::FirewallREDTunnelUp": "Event::Firewall::FirewallREDTunnelDown",
+	"Event::Firewall::FirewallVPNTunnelUp": "Event::Firewall::FirewallVPNTunnelDown",
+	"Event::Firewall::Reconnected": "Event::Firewall::LostConnectionToSophosCentral",
+	"Event::Mobile::ApnsCertificateRenewed": "Event::Mobile::ApnsCertificateExpired"
+}

@@ -3,6 +3,7 @@ const fetch = require("node-fetch-commonjs");
 const { RateLimit } = require('async-sema');
 var fs = require('fs');
 const orgMapping = require('../OrgMapping.json');
+const upDownEvents = require('../UpDownEvents.json');
 
 module.exports = async function (context, myTimer) {
     var timeStamp = new Date().toISOString();
@@ -55,91 +56,124 @@ module.exports = async function (context, myTimer) {
 
                 if (alerts && alerts.length > 0) {
                     var filteredAlerts = alerts.filter(alert => alert.severity != "low");
+                    var upAlerts = alerts.filter(alert => alert.severity == "low" && Object.keys(upDownEvents).includes(alert.type));
 
-                    if (filteredAlerts.length > 0) {
-                        // Connect to the Autotask API
-                        const autotask = new AutotaskRestApi(
-                            process.env.AUTOTASK_USER,
-                            process.env.AUTOTASK_SECRET, 
-                            process.env.AUTOTASK_INTEGRATION_CODE 
-                        );
-                        let api = await autotask.api();
+                    // Connect to the Autotask API
+                    const autotask = new AutotaskRestApi(
+                        process.env.AUTOTASK_USER,
+                        process.env.AUTOTASK_SECRET, 
+                        process.env.AUTOTASK_INTEGRATION_CODE 
+                    );
+                    let api = await autotask.api();
 
-                        var alertTenants = filteredAlerts.map(function(alert) {
-                            return alert.customer_id;
+                    var alertTenants = filteredAlerts.map(function(alert) {
+                        return alert.customer_id;
+                    });
+                    alertTenants = [...new Set(alertTenants)]
+
+                    let alertDevices = {};
+                    for (i = 0; i < alertTenants.length; i++) {
+                        var tenantID = alertTenants[i];
+                        let sophosTenant = sophosTenants.items.filter(t => t.id == tenantID)[0];
+                        let deviceIDs = filteredAlerts.filter(alert => alert.customer_id == tenantID).map(function(alert) {
+                            return alert.data.endpoint_id;
                         });
-                        alertTenants = [...new Set(alertTenants)]
 
-                        let alertDevices = {};
-                        for (i = 0; i < alertTenants.length; i++) {
-                            var tenantID = alertTenants[i];
-                            let sophosTenant = sophosTenants.items.filter(t => t.id == tenantID)[0];
-                            let deviceIDs = filteredAlerts.filter(alert => alert.customer_id == tenantID).map(function(alert) {
-                                return alert.data.endpoint_id;
-                            });
+                        var devices = await getSophosDevices(context, sophosJWT, sophosTenant, deviceIDs);
+                        if (devices && devices.items) {
+                            alertDevices[tenantID] = devices.items;
+                        }
+                    }
 
-                            var devices = await getSophosDevices(context, sophosJWT, sophosTenant, deviceIDs);
-                            if (devices && devices.items) {
-                                alertDevices[tenantID] = devices.items;
-                            }
+                    for (i = 0; i < filteredAlerts.length; i++) {
+                        var alert = filteredAlerts[i];
+                        // Go through each alert (that isn't low severity) and create a new ticket in Autotask for it
+                        let sophosCompany = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0].name;
+                        let autotaskID = 0;
+                        if (sophosCompany) {
+                            autotaskID = orgMapping[sophosCompany];
                         }
 
-                        for (i = 0; i < filteredAlerts.length; i++) {
-                            var alert = filteredAlerts[i];
-                            // Go through each alert (that isn't low severity) and create a new ticket in Autotask for it
-                            let sophosCompany = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0].name;
-                            let autotaskID = 0;
-                            if (sophosCompany) {
-                                autotaskID = orgMapping[sophosCompany];
-                            }
+                        // Get primary location and default contract
+                        var contractID = await getAutotaskContractID(api, autotaskID);
+                        var location = await getAutotaskLocation(api, autotaskID);
 
-                            // Get primary location and default contract
-                            var contractID = await getAutotaskContractID(api, autotaskID);
-                            var location = await getAutotaskLocation(api, autotaskID);
+                        // Get related device if applicable
+                        var customerDevices = alertDevices[alert.customer_id];
+                        var alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
+                        var deviceID = null;
+                        if (alertDevice) {
+                            deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);
+                        }
+                        
+                        var title = `Sophos Alert: "${alert.description}"`;
+                        if (!title.includes(alert.location)) {
+                            title = title + ` on "${alert.location}"`;
+                        }
+                        var when = new Date(alert.when);
+                        var description = `${alert.description} \nSeverity: ${alert.severity} \nDevice: ${alert.location}`;
+                        if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
+                            description += `\nIP: ${alert.data.source_info.ip}`;
+                        }
+                        description += `\nEvent Type: ${alert.type} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
 
-                            // Get related device if applicable
-                            var customerDevices = alertDevices[alert.customer_id];
-                            var alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
-                            var deviceID = null;
-                            if (alertDevice) {
-                                deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);
-                            }
-                            
-                            var title = `Sophos Alert: "${alert.description}`;
-                            if (!title.includes(alert.location)) {
-                                title = title + ` on "${alert.location}"`;
-                            }
-                            var when = new Date(alert.when);
-                            var description = `${alert.description} \nSeverity: ${alert.severity} \nDevice: ${alert.location}`;
-                            if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
-                                description += `\nIP: ${alert.data.source_info.ip}`;
-                            }
-                            description += `\nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
-
-                            if (process.env.HOW_TO_DOCUMENTATION_LINK) {
-                                description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
-                            }
-                            
-                            // Make a new ticket
-                            let newTicket = {
-                                CompanyID: autotaskID,
-                                CompanyLocationID: (location ? location.id : 10),
-                                Priority: alert.severity == 'medium' ? 3 : 2,
-                                Status: 1,
-                                QueueID: parseInt(process.env.TICKET_QueueID),
-                                IssueType: parseInt(process.env.TICKET_IssueType),
-                                SubIssueType: parseInt(process.env.TICKET_SubIssueType),
-                                ServiceLevelAgreementID: parseInt(process.env.TICKET_ServiceLevelAgreementID),
-                                ContractID: (contractID ? contractID : null),
-                                Title: title,
-                                Description: description
-                            };
-                            if (deviceID) {
-                                newTicket.ConfigurationItemID = deviceID;
-                            }
-
-                            await createAutotaskTicket(context, api, newTicket);
+                        if (process.env.HOW_TO_DOCUMENTATION_LINK) {
+                            description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
+                        }
+                        
+                        // Make a new ticket
+                        let newTicket = {
+                            CompanyID: autotaskID,
+                            CompanyLocationID: (location ? location.id : 10),
+                            Priority: alert.severity == 'medium' ? 3 : 2,
+                            Status: 1,
+                            QueueID: parseInt(process.env.TICKET_QueueID),
+                            IssueType: parseInt(process.env.TICKET_IssueType),
+                            SubIssueType: parseInt(process.env.TICKET_SubIssueType),
+                            ServiceLevelAgreementID: parseInt(process.env.TICKET_ServiceLevelAgreementID),
+                            ContractID: (contractID ? contractID : null),
+                            Title: title,
+                            Description: description
                         };
+                        if (deviceID) {
+                            newTicket.ConfigurationItemID = deviceID;
+                        }
+
+                        await createAutotaskTicket(context, api, newTicket);
+                    };
+
+                    // Close tickets on up alerts
+                    for (i = 0; i < upAlerts.length; i++) {
+                        var alert = upAlerts[i];
+                        // Go through each up alert and find the relevant ticket in Autotask then self-heal it
+                        let sophosCompany = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0].name;
+                        let autotaskID = 0;
+                        if (sophosCompany) {
+                            autotaskID = orgMapping[sophosCompany];
+                        }
+                        
+                        let tickets = await searchAutotaskTickets(context, api, autotaskID, "Sophos Alert: ", alert.location, upDownEvents[alert.type]);
+                        if (tickets && tickets.length > 0) {
+                            // get latest ticket
+                            let downTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
+
+                            if (downTicket) {
+                                let closingNote = {
+                                    "TicketID": downTicket.id,
+                                    "Title": "Self-Healing Update",
+                                    "Description": "[Self-Healing] " + alert.description,
+                                    "NoteType": 1,
+                                    "Publish": 1
+                                }
+                                api.TicketNotes.create(downTicket.id, closingNote);
+
+                                let closingTicket = {
+                                    "id": downTicket.id,
+                                    "Status": (downTicket.assignedResourceID ? 13 : 5)
+                                }
+                                api.Tickets.update(closingTicket);
+                            }
+                        }
                     }
                 }
 
@@ -442,6 +476,64 @@ async function getAutotaskDevice(autotaskAPI, autotaskID, deviceDetails) {
         deviceID = device.items[0].id;
     }
     return deviceID;
+}
+
+async function searchAutotaskTickets(context, autotaskAPI, companyID = false, titleStart = false, deviceName = false, eventType = false) {
+    var ticketFilters = [];
+
+    if (companyID) {
+        ticketFilters.push({
+            "op": "eq",
+            "field": "CompanyID",
+            "value": companyID
+        });
+    }
+    if (titleStart) {
+        ticketFilters.push({
+            "op": "beginsWith",
+            "field": "title",
+            "value": titleStart
+        });
+    }
+    if (deviceName) {
+        ticketFilters.push({
+            "op": "contains",
+            "field": "description",
+            "value": "Device: " + deviceName
+        });
+    }
+    if (eventType) {
+        ticketFilters.push({
+            "op": "contains",
+            "field": "description",
+            "value": "Event Type: " + eventType
+        });
+    }
+    ticketFilters.push({
+        "op": "notExist",
+        "field": "CompletedByResourceID"
+    });
+    ticketFilters.push({
+        "op": "notExist",
+        "field": "CompletedDate"
+    });
+
+    try {
+        let tickets = await autotaskAPI.Tickets.query({
+            "filter": [
+                {
+                    "op": "and",
+                    "items": ticketFilters
+                }
+            ]
+        });
+        if (tickets && tickets.items) {
+            return tickets.items;
+        }
+        return null;
+    } catch (error) {
+        context.log.error(error);
+    }
 }
 
 async function createAutotaskTicket(context, autotaskAPI, newTicket) {

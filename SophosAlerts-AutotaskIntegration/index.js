@@ -105,7 +105,7 @@ module.exports = async function (context, myTimer) {
                         if (alertDevice) {
                             deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);
                         }
-                        
+
                         var title = `Sophos Alert: "${alert.description}"`;
                         if (!title.includes(alert.location)) {
                             title = title + ` on "${alert.location}"`;
@@ -117,29 +117,51 @@ module.exports = async function (context, myTimer) {
                         }
                         description += `\nEvent Type: ${alert.type} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
 
-                        if (process.env.HOW_TO_DOCUMENTATION_LINK) {
-                            description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
-                        }
-                        
-                        // Make a new ticket
-                        let newTicket = {
-                            CompanyID: autotaskID,
-                            CompanyLocationID: (location ? location.id : 10),
-                            Priority: alert.severity == 'medium' ? 3 : 2,
-                            Status: 1,
-                            QueueID: parseInt(process.env.TICKET_QueueID),
-                            IssueType: parseInt(process.env.TICKET_IssueType),
-                            SubIssueType: parseInt(process.env.TICKET_SubIssueType),
-                            ServiceLevelAgreementID: parseInt(process.env.TICKET_ServiceLevelAgreementID),
-                            ContractID: (contractID ? contractID : null),
-                            Title: title,
-                            Description: description
-                        };
-                        if (deviceID) {
-                            newTicket.ConfigurationItemID = deviceID;
-                        }
+                        // See if there are any existing tickets of this type and for this device
+                        let tickets = await searchAutotaskTickets(context, api, autotaskID, "Sophos Alert: ", alert.location, upDownEvents[alert.type]);
 
-                        await createAutotaskTicket(context, api, newTicket);
+                        if (tickets && tickets.length > 0) {
+                            // Existing ticket found, add notes
+                            // get latest ticket
+                            let existingTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
+
+                            if (existingTicket) {
+                                let updateNote = {
+                                    "TicketID": existingTicket.id,
+                                    "Title": "New Alert",
+                                    "Description": description,
+                                    "NoteType": 1,
+                                    "Publish": 1
+                                }
+                                api.TicketNotes.create(existingTicket.id, updateNote);
+                                context.log("New ticket note added on ticket id: " + existingTicket.id);
+                            }
+                        } else {
+                            // No existing ticket found, create a new one
+                            if (process.env.HOW_TO_DOCUMENTATION_LINK) {
+                                description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
+                            }
+                            
+                            // Make a new ticket
+                            let newTicket = {
+                                CompanyID: autotaskID,
+                                CompanyLocationID: (location ? location.id : 10),
+                                Priority: alert.severity == 'medium' ? 3 : 2,
+                                Status: 1,
+                                QueueID: parseInt(process.env.TICKET_QueueID),
+                                IssueType: parseInt(process.env.TICKET_IssueType),
+                                SubIssueType: parseInt(process.env.TICKET_SubIssueType),
+                                ServiceLevelAgreementID: parseInt(process.env.TICKET_ServiceLevelAgreementID),
+                                ContractID: (contractID ? contractID : null),
+                                Title: title,
+                                Description: description
+                            };
+                            if (deviceID) {
+                                newTicket.ConfigurationItemID = deviceID;
+                            }
+
+                            await createAutotaskTicket(context, api, newTicket);
+                        }
                     };
 
                     // Close tickets on up alerts

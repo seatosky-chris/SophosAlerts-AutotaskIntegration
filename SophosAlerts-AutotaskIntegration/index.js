@@ -106,10 +106,6 @@ module.exports = async function (context, myTimer) {
                             deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);
                         }
 
-                        var title = `Sophos Alert: "${alert.description}"`;
-                        if (!title.includes(alert.location)) {
-                            title = title + ` on "${alert.location}"`;
-                        }
                         var when = new Date(alert.when);
                         var description = `${alert.description} \nSeverity: ${alert.severity} \nDevice: ${alert.location}`;
                         if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
@@ -140,6 +136,23 @@ module.exports = async function (context, myTimer) {
                             // No existing ticket found, create a new one
                             if (process.env.HOW_TO_DOCUMENTATION_LINK) {
                                 description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
+                            }
+
+                            var title = `Sophos Alert: "${alert.description}"`;
+                            var includeAlertLocation = false;
+                            if (!title.includes(alert.location)) {
+                                title = title + ` on "${alert.location}"`;
+                                includeAlertLocation = true;
+                            }
+                            var titleLength = title.length;
+                            if (titleLength > 140) {
+                                // title is too long, lets cut it down to 140 characters
+                                var cutOff = titleLength - 140;
+                                var cutDescription = alert.description.substring(0, (alert.description.length - cutOff) - 3) + "...";
+                                var title = `Sophos Alert: "${cutDescription}"`;
+                                if (includeAlertLocation) {
+                                    title = title + ` on "${alert.location}"`;
+                                }
                             }
                             
                             // Make a new ticket

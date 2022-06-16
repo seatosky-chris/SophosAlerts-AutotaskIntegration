@@ -100,7 +100,10 @@ module.exports = async function (context, myTimer) {
 
                         // Get related device if applicable
                         var customerDevices = alertDevices[alert.customer_id];
-                        var alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
+                        var alertDevice = null;
+                        if (customerDevices && customerDevices.length > 0) {
+                            alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
+                        }
                         var deviceID = null;
                         if (alertDevice) {
                             deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);

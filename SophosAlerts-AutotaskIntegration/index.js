@@ -117,7 +117,7 @@ module.exports = async function (context, myTimer) {
                         description += `\nEvent Type: ${alert.type} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
 
                         // See if there are any existing tickets of this type and for this device
-                        let tickets = await searchAutotaskTickets(context, api, autotaskID, "Sophos Alert: ", alert.location, upDownEvents[alert.type]);
+                        let tickets = await searchAutotaskTickets(context, api, autotaskID, "Sophos Alert: ", alert.location, alert.type);
 
                         if (tickets && tickets.length > 0) {
                             // Existing ticket found, add notes
@@ -341,7 +341,7 @@ async function getSophosDevices(context, token, tenant, ids = null) {
 async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
     let queryUrls = [];
 
-    tenants.items.filter(t => t.status == 'active').forEach(function(tenant) {
+    tenants.items.filter(t => t.status && t.status == 'active').forEach(function(tenant) {
         let url = 'https://api-' + tenant.dataRegion + '.central.sophos.com/siem/v1/alerts';
         if (fromDate && Number.isInteger(fromDate)) {
             url = url + '?from_date=' + fromDate + '&limit=1000';
@@ -358,7 +358,7 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
         queryUrls.push({url, fetchHeader});
     });
 
-    const limit = RateLimit(8);
+    const limit = RateLimit(12);
     const fetchFromApi = ({url, fetchHeader}) => {
         const response = fetch(url, fetchHeader)
             .then((res) => res.json())
@@ -483,6 +483,9 @@ async function getAutotaskDevice(autotaskAPI, autotaskID, deviceDetails) {
     
     if (device.items.length > 1) { 
         var filteredDevices = device.items.filter(function(device) {
+            if (!device.rmmDeviceAuditMacAddress || !deviceDetails.macAddresses) {
+                return false;
+            }
             var rmmMacAddresses = device.rmmDeviceAuditMacAddress.replace(/^\[|\]$/gm,'').split(', ');
             var intersection = deviceDetails.macAddresses.filter(addr => rmmMacAddresses.includes(addr));
             return intersection.length > 0;
@@ -597,8 +600,8 @@ async function createAutotaskTicket(context, autotaskAPI, newTicket) {
                     Name: process.env.EMAIL_TO__Name
                 }
             ],
-            "Subject": newTicket.title,
-            "HTMLContent": newTicket.description.replace(new RegExp('\r?\n','g'), "<br />")
+            "Subject": newTicket.Title,
+            "HTMLContent": newTicket.Description.replace(new RegExp('\r?\n','g'), "<br />")
         }
 
         try {

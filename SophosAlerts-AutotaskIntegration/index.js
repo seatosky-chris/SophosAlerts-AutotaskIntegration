@@ -203,13 +203,13 @@ module.exports = async function (context, myTimer) {
                                     "NoteType": 1,
                                     "Publish": 1
                                 }
-                                api.TicketNotes.create(downTicket.id, closingNote);
+                                await api.TicketNotes.create(downTicket.id, closingNote);
 
                                 let closingTicket = {
                                     "id": downTicket.id,
                                     "Status": (downTicket.assignedResourceID ? 13 : 5)
                                 }
-                                api.Tickets.update(closingTicket);
+                                await api.Tickets.update(closingTicket);
                             }
                         }
                     }

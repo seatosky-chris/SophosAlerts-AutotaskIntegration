@@ -4,6 +4,7 @@ const { RateLimit } = require('async-sema');
 var fs = require('fs');
 const orgMapping = require('../OrgMapping.json');
 const upDownEvents = require('../UpDownEvents.json');
+var idRegex = /ID: ([0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12})(\n| )/gm
 
 module.exports = async function (context, myTimer) {
     var timeStamp = new Date().toISOString();
@@ -114,7 +115,7 @@ module.exports = async function (context, myTimer) {
                         if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
                             description += `\nIP: ${alert.data.source_info.ip}`;
                         }
-                        description += `\nEvent Type: ${alert.type} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
+                        description += `\nEvent Type: ${alert.type} \nID: ${alert.id} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
 
                         // See if there are any existing tickets of this type and for this device
                         let tickets = await searchAutotaskTickets(context, api, autotaskID, "Sophos Alert: ", alert.location, alert.type);
@@ -213,6 +214,39 @@ module.exports = async function (context, myTimer) {
                             }
                         }
                     }
+
+                    // Close tickets where the original alert no longer exists (closed but we don't get an up alert)
+                    var allSophosAlertTickets = await searchAutotaskTickets(context, api, false, "Sophos Alert: ");
+                    for (i = 0; i < allSophosAlertTickets.length; i++) {
+                        var alertTicket = allSophosAlertTickets[i];
+                        var alertIDMatches = idRegex.exec(alertTicket.description);
+                        if (alertIDMatches) {
+                            var alertID = alertIDMatches[1];
+                            if (alertID) {
+                                var sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
+                                var sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
+                                var sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                
+                                if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
+                                    // Alert in Sophos has been closed, self-heal the related ticket
+                                    let closingNote = {
+                                        "TicketID": alertTicket.id,
+                                        "Title": "Self-Healing Update",
+                                        "Description": "[Self-Healing] The Sophos alert is no longer open. Self-healing this ticket.",
+                                        "NoteType": 1,
+                                        "Publish": 1
+                                    }
+                                    await api.TicketNotes.create(alertTicket.id, closingNote);
+    
+                                    let closingTicket = {
+                                        "id": alertTicket.id,
+                                        "Status": (alertTicket.assignedResourceID ? 13 : 5)
+                                    }
+                                    await api.Tickets.update(closingTicket);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 try {
@@ -232,6 +266,10 @@ module.exports = async function (context, myTimer) {
 
 function timeout(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getKeyByValue(object, value) {
+    return Object.keys(object).find(key => object[key] == value);
 }
 
 async function getSophosToken(context) {
@@ -377,6 +415,22 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
     }
 
     return alerts;
+}
+
+async function getSophosAlert(context, token, tenant, alertID) {
+    let url = 'https://api-' + tenant.dataRegion + '.central.sophos.com/common/v1/alerts/' + alertID
+
+    let fetchHeader = {
+        method: "GET",
+        headers: {
+            Authorization: "Bearer " + token,
+            "X-Tenant-ID": tenant.id,
+            "Accept": "application/json"
+        }
+    };
+
+    return fetch(url, fetchHeader)
+        .then((response) => response.json());
 }
 
 async function getAutotaskLocation(autotaskAPI, autotaskID) {

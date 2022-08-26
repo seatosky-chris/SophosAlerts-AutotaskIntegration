@@ -16,3 +16,6 @@ For the script to work, you must map each organization in Sophos to the correspo
 - Setup the OrgMapping.json file with an entry for each company in Sophos that you want to integrate with Autotask. See the above "Organization Mapping" section.
 - Push this to an Azure Function and ensure the environment variables get updated.
 - The script will now run every 10 minutes to check for new alerts.
+
+### Troubleshooting
+When testing, I found that the Autotask package was unable to connect to the Autotask server due to the OpenSSL error: `unsafe legacy renegotiation disabled`. It appears this is related to a fix in OpenSSL that Autotask likely hasn't implemented on their server. I was able to fix this by using an older version of NodeJS, specifically version **16.13.0**.

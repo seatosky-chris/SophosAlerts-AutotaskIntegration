@@ -47,7 +47,6 @@ module.exports = async function (context, myTimer) {
         ignoredAlertTypes.map(a => a.trim());
     }
     
-    
     let sophosToken = await getSophosToken(context);
 
     let sophosJWT = false;
@@ -429,40 +428,66 @@ async function getSophosDevices(context, token, tenant, ids = null) {
 
 async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
     let queryUrls = [];
+    let retryUrls = [];
 
-    tenants.items.filter(t => t.status && t.status == 'active').forEach(function(tenant) {
-        let url = 'https://api-' + tenant.dataRegion + '.central.sophos.com/siem/v1/alerts';
-        if (fromDate && Number.isInteger(fromDate)) {
-            url = url + '?from_date=' + fromDate + '&limit=1000';
-        }
-
-        let fetchHeader = {
-            headers: {
-                Authorization: "Bearer " + token,
-                "X-Tenant-ID": tenant.id,
-                method: "GET"
+    try {
+        tenants.items.filter(t => t !== undefined).filter(t => t.status && t.status == 'active').forEach(function(tenant) {
+            let url = 'https://api-' + tenant.dataRegion + '.central.sophos.com/siem/v1/alerts';
+            if (fromDate && Number.isInteger(fromDate)) {
+                url = url + '?from_date=' + fromDate + '&limit=1000';
             }
-        };
 
-        queryUrls.push({url, fetchHeader});
-    });
+            let fetchHeader = {
+                headers: {
+                    Authorization: "Bearer " + token,
+                    "X-Tenant-ID": tenant.id,
+                    method: "GET"
+                }
+            };
+
+            queryUrls.push({url, fetchHeader});
+        });
+    } catch (err) {
+        context.log.error(err); 
+        context.log.warn(tenants.items[0]);
+        context.log.warn(tenants.items);
+    }
 
     const limit = RateLimit(12);
-    const fetchFromApi = ({url, fetchHeader}) => {
+    const fetchFromApi = ({url, fetchHeader}, retry) => {
         const response = fetch(url, fetchHeader)
             .then((res) => res.json())
-            .catch((error) => context.log.error(error));
+            .catch((error) => {
+                if (!retry) {
+                    retryUrls.push({url, fetchHeader});
+                    context.log.warn(error);
+                } else {
+                    context.log.error(error); 
+                }
+                return;
+            });
         return response;
     };
 
     let alerts = [];
     for (const query of queryUrls) {
         await limit();
-        fetchFromApi(query).then((result) => {
+        fetchFromApi(query, false).then((result) => {
             if (result && result.items) {
                 alerts = alerts.concat(result.items);
             }
         });
+    }
+
+    if (retryUrls && retryUrls.length > 0) {
+        for (const query of retryUrls) {
+            await limit();
+            fetchFromApi(query, true).then((result) => {
+                if (result && result.items) {
+                    alerts = alerts.concat(result.items);
+                }
+            });
+        }
     }
 
     return alerts;

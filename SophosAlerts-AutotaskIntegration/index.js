@@ -42,7 +42,11 @@ module.exports = async function (context, myTimer) {
     }
     
     let sophosToken = await getSophosToken(context);
-    let sophosJWT = sophosToken.access_token;
+
+    let sophosJWT = false;
+    if (sophosToken && sophosToken.access_token) {
+        sophosJWT = sophosToken.access_token;
+    }
 
     if (sophosJWT) {
         var sophosPartnerID = await getSophosPartnerID(context, sophosJWT);

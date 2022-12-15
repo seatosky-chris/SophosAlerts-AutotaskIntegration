@@ -11,6 +11,7 @@ module.exports = async function (context, myTimer) {
     var lastRun = false
     var lastRunUnixTimestamp = false;
     var lastRunDir = null;
+    var ignoredAlertTypes = [];
 
 
     if (fs.existsSync("C:/home/data")) {
@@ -40,6 +41,12 @@ module.exports = async function (context, myTimer) {
             lastRunUnixTimestamp = false;
         }
     }
+
+    if (process.env.IGNORE_AlertTypes) {
+        ignoredAlertTypes = process.env.IGNORE_AlertTypes.split(',');
+        ignoredAlertTypes.map(a => a.trim());
+    }
+    
     
     let sophosToken = await getSophosToken(context);
 

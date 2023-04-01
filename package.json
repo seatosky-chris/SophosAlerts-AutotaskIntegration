@@ -8,8 +8,7 @@
   },
   "dependencies": {
     "@apigrate/autotask-restapi": "^0.6.0",
-    "node-fetch-commonjs": "^3.1.1",
-    "async-sema": "^3.1.1"
-  },
-  "devDependencies": {}
+    "bottleneck": "^2.19.5",
+    "node-fetch-commonjs": "^3.1.1"
+  }
 }

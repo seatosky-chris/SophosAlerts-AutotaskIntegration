@@ -1,6 +1,6 @@
 const {AutotaskRestApi} = require('@apigrate/autotask-restapi');
 const fetch = require("node-fetch-commonjs");
-const { RateLimit } = require('async-sema');
+var Bottleneck = require("bottleneck");
 var fs = require('fs');
 const orgMapping = require('../OrgMapping.json');
 const upDownEvents = require('../UpDownEvents.json');
@@ -453,42 +453,37 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
         context.log.warn(tenants.items);
     }
 
-    const limit = RateLimit(12);
-    const fetchFromApi = ({url, fetchHeader}, retry) => {
-        const response = fetch(url, fetchHeader)
-            .then((res) => res.json())
-            .catch((error) => {
-                if (!retry) {
-                    retryUrls.push({url, fetchHeader});
-                    context.log.warn(error);
-                } else {
-                    context.log.error(error); 
-                }
-                return;
-            });
-        return response;
-    };
+    const limiter = new Bottleneck({
+        maxConcurrent: 1,
+        minTime: 150
+    });
 
-    let alerts = [];
-    for (const query of queryUrls) {
-        await limit();
-        fetchFromApi(query, false).then((result) => {
-            if (result && result.items) {
-                alerts = alerts.concat(result.items);
-            }
+      function scheduleRequest(query) {
+        return limiter.schedule(()=>{
+            return fetch(query.url, query.fetchHeader)
+                .then((response) => response.json());
+        })
+      }
+
+      async function getAlerts() {
+        let errors = [];
+
+        const alertPromises = queryUrls.map(query => {
+            return scheduleRequest(query);
         });
-    }
 
-    if (retryUrls && retryUrls.length > 0) {
-        for (const query of retryUrls) {
-            await limit();
-            fetchFromApi(query, true).then((result) => {
-                if (result && result.items) {
-                    alerts = alerts.concat(result.items);
-                }
-            });
+        let alertsRaw = await promiseAll(alertPromises, errors);
+        alertsRaw = alertsRaw.filter(a => a.items && a.items.length > 0);
+        const alerts = alertsRaw.map(a => a.items).flat();
+
+        if (errors) {
+            context.log.error(errors);
         }
-    }
+
+        return alerts;
+      }
+
+    var alerts = await getAlerts();
 
     return alerts;
 }
@@ -753,3 +748,12 @@ async function createAutotaskTicket(context, autotaskAPI, newTicket) {
     }
     return ticketID;
 }
+
+function promiseAll(promises, errors) {
+    return Promise.all(promises.map(p => {
+        return p.catch(e  => {
+            errors.push(e.response);
+            return null;
+        });
+    }));
+};

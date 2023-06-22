@@ -1,6 +1,6 @@
 const {AutotaskRestApi} = require('@apigrate/autotask-restapi');
 const fetch = require("node-fetch-commonjs");
-var Bottleneck = require("bottleneck");
+const { RateLimit } = require('async-sema');
 var fs = require('fs');
 const orgMapping = require('../OrgMapping.json');
 const upDownEvents = require('../UpDownEvents.json');
@@ -156,7 +156,7 @@ module.exports = async function (context, myTimer) {
                         }
 
                         var when = new Date(alert.when);
-                        var description = `${alert.description} \nSeverity: ${alert.severity} \nDevice: ${alert.location}`;
+                        var description = `${alert.description} \nSeverity: ${alert.severity} \nCompany: ${sophosCompany} \nDevice: ${alert.location}`;
                         if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
                             description += `\nIP: ${alert.data.source_info.ip}`;
                         }
@@ -181,7 +181,7 @@ module.exports = async function (context, myTimer) {
                                     "NoteType": 1,
                                     "Publish": 1
                                 }
-                                api.TicketNotes.create(existingTicket.id, updateNote);
+                                await api.TicketNotes.create(existingTicket.id, updateNote);
                                 context.log("New ticket note added on ticket id: " + existingTicket.id);
                             }
                         } else {
@@ -274,7 +274,13 @@ module.exports = async function (context, myTimer) {
                                 if (alertID) {
                                     var sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
                                     var sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
-                                    var sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
+
+                                    if (!sophosTenant || sophosTenant == undefined) {
+                                        continue
+                                    }
+
+                                    sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                    context.log("Alert: " + sophosAlert);
                                     
                                     if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
                                         // Alert in Sophos has been closed, self-heal the related ticket
@@ -382,7 +388,7 @@ async function getSophosTenants(context, token, partnerID) {
         context.log.error(error);
     }
 
-    if (sophosTenantsJson.pages && sophosTenantsJson.pages.total > 1) {
+    if (sophosTenantsJson && sophosTenantsJson.pages && sophosTenantsJson.pages.total > 1) {
         var totalPages = sophosTenantsJson.pages.total;
         for (let i = 2; i <= totalPages; i++) {
             try {
@@ -453,37 +459,42 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
         context.log.warn(tenants.items);
     }
 
-    const limiter = new Bottleneck({
-        maxConcurrent: 1,
-        minTime: 150
-    });
+    const limit = RateLimit(12);
+    const fetchFromApi = ({url, fetchHeader}, retry) => {
+        const response = fetch(url, fetchHeader)
+            .then((res) => res.json())
+            .catch((error) => {
+                if (!retry) {
+                    retryUrls.push({url, fetchHeader});
+                    context.log.warn(error);
+                } else {
+                    context.log.error(error); 
+                }
+                return;
+            });
+        return response;
+    };
 
-      function scheduleRequest(query) {
-        return limiter.schedule(()=>{
-            return fetch(query.url, query.fetchHeader)
-                .then((response) => response.json());
-        })
-      }
-
-      async function getAlerts() {
-        let errors = [];
-
-        const alertPromises = queryUrls.map(query => {
-            return scheduleRequest(query);
+    let alerts = [];
+    for (const query of queryUrls) {
+        await limit();
+        fetchFromApi(query, false).then((result) => {
+            if (result && result.items) {
+                alerts = alerts.concat(result.items);
+            }
         });
+    }
 
-        let alertsRaw = await promiseAll(alertPromises, errors);
-        alertsRaw = alertsRaw.filter(a => a.items && a.items.length > 0);
-        const alerts = alertsRaw.map(a => a.items).flat();
-
-        if (errors) {
-            context.log.error(errors);
+    if (retryUrls && retryUrls.length > 0) {
+        for (const query of retryUrls) {
+            await limit();
+            fetchFromApi(query, true).then((result) => {
+                if (result && result.items) {
+                    alerts = alerts.concat(result.items);
+                }
+            });
         }
-
-        return alerts;
-      }
-
-    var alerts = await getAlerts();
+    }
 
     return alerts;
 }
@@ -619,14 +630,14 @@ async function getAutotaskDevice(autotaskAPI, autotaskID, deviceDetails) {
             device.items = filteredDevices;
         }
 
-        if (device.items.length > 1) {  
+        if (device.items.length > 1 && deviceDetails.associatedPerson && deviceDetails.associatedPerson.viaLogin) {  
             filteredDevices = device.items.filter(device => device.rmmDeviceAuditLastUser == deviceDetails.associatedPerson.viaLogin);
             if (filteredDevices.length > 0) {
                 device.items = filteredDevices;
             }
         }
 
-        if (device.items.length > 1) {
+        if (device.items.length > 1 && deviceDetails.ipv4Addresses) {
             filteredDevices = device.items.filter(device => deviceDetails.ipv4Addresses.includes(device.rmmDeviceAuditIPAddress));
             if (filteredDevices.length > 0) {
                 device.items = filteredDevices;
@@ -748,12 +759,3 @@ async function createAutotaskTicket(context, autotaskAPI, newTicket) {
     }
     return ticketID;
 }
-
-function promiseAll(promises, errors) {
-    return Promise.all(promises.map(p => {
-        return p.catch(e  => {
-            errors.push(e.response);
-            return null;
-        });
-    }));
-};

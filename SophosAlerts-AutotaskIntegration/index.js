@@ -238,7 +238,8 @@ module.exports = async function (context, myTimer) {
                         for (i = 0; i < upAlerts.length; i++) {
                             var alert = upAlerts[i];
                             // Go through each up alert and find the relevant ticket in Autotask then self-heal it
-                            let sophosCompany = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0].name;
+                            var sophosTenant = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0];
+                            let sophosCompany = sophosTenant.name;
                             let autotaskID = 0;
                             if (sophosCompany) {
                                 autotaskID = orgMapping[sophosCompany];
@@ -264,44 +265,62 @@ module.exports = async function (context, myTimer) {
                                         "Status": (downTicket.assignedResourceID ? 13 : 5)
                                     }
                                     await api.Tickets.update(closingTicket);
+
+                                    // Close sophos down alert
+                                    var alertIDMatches = idRegex.exec(downTicket.description);
+                                    if (alertIDMatches) {
+                                        var alertID = alertIDMatches[1];
+                                        if (alertID) {
+                                            closeSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                            context.log("Closed the Sophos down alert.")
+                                        }
+                                    }
+
+                                    // Close sophos up alert
+                                    closeSophosAlert(context, sophosJWT, sophosTenant, alert.id);
+                                    context.log("Closed the Sophos up alert.")
+                                } else {
+                                    context.log("No latest down ticket found.")
                                 }
                             }
                         }
 
                         // Close tickets where the original alert no longer exists (closed but we don't get an up alert)
                         var allSophosAlertTickets = await searchAutotaskTickets(context, api, false, "Sophos Alert: ");
-                        for (i = 0; i < allSophosAlertTickets.length; i++) {
-                            var alertTicket = allSophosAlertTickets[i];
-                            var alertIDMatches = idRegex.exec(alertTicket.description);
-                            if (alertIDMatches) {
-                                var alertID = alertIDMatches[1];
-                                if (alertID) {
-                                    var sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
-                                    var sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
+                        if (allSophosAlertTickets && allSophosAlertTickets.length > 0) {
+                            for (i = 0; i < allSophosAlertTickets.length; i++) {
+                                var alertTicket = allSophosAlertTickets[i];
+                                var alertIDMatches = idRegex.exec(alertTicket.description);
+                                if (alertIDMatches) {
+                                    var alertID = alertIDMatches[1];
+                                    if (alertID) {
+                                        var sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
+                                        var sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
 
-                                    if (!sophosTenant || sophosTenant == undefined) {
-                                        continue
-                                    }
+                                        if (!sophosTenant || sophosTenant == undefined) {
+                                            continue
+                                        }
 
-                                    sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
-                                    context.log("Alert: " + sophosAlert);
-                                    
-                                    if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
-                                        // Alert in Sophos has been closed, self-heal the related ticket
-                                        let closingNote = {
-                                            "TicketID": alertTicket.id,
-                                            "Title": "Self-Healing Update",
-                                            "Description": "[Self-Healing] The Sophos alert is no longer open. Self-healing this ticket.",
-                                            "NoteType": 1,
-                                            "Publish": 1
+                                        sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                        context.log("Alert: " + sophosAlert);
+                                        
+                                        if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
+                                            // Alert in Sophos has been closed, self-heal the related ticket
+                                            let closingNote = {
+                                                "TicketID": alertTicket.id,
+                                                "Title": "Self-Healing Update",
+                                                "Description": "[Self-Healing] The Sophos alert is no longer open. Self-healing this ticket.",
+                                                "NoteType": 1,
+                                                "Publish": 1
+                                            }
+                                            await api.TicketNotes.create(alertTicket.id, closingNote);
+            
+                                            let closingTicket = {
+                                                "id": alertTicket.id,
+                                                "Status": (alertTicket.assignedResourceID ? 13 : 5)
+                                            }
+                                            await api.Tickets.update(closingTicket);
                                         }
-                                        await api.TicketNotes.create(alertTicket.id, closingNote);
-        
-                                        let closingTicket = {
-                                            "id": alertTicket.id,
-                                            "Status": (alertTicket.assignedResourceID ? 13 : 5)
-                                        }
-                                        await api.Tickets.update(closingTicket);
                                     }
                                 }
                             }
@@ -517,6 +536,31 @@ async function getSophosAlert(context, token, tenant, alertID) {
 
     return fetch(url, fetchHeader)
         .then((response) => response.json());
+}
+
+async function closeSophosAlert(context, token, tenant, alertID) {
+    // Marks the alert as acknowledged
+    let url = 'https://api-' + tenant.dataRegion + '.central.sophos.com/common/v1/alerts/' + alertID + '/actions'
+
+    let requestBody = {        
+        action: "acknowledge",
+        message: "Acknowledged by Autotask Integration"
+    }
+
+    let fetchHeader = {
+        method: "POST",
+        headers: {
+            Authorization: "Bearer " + token,
+            "X-Tenant-ID": tenant.id,
+            "Accept": "application/json"
+        },
+        body: JSON.stringify(requestBody)
+    };
+
+    let response = fetch(url, fetchHeader)
+        .then((response) => response.json());
+
+    return;
 }
 
 async function getAutotaskLocation(autotaskAPI, autotaskID) {

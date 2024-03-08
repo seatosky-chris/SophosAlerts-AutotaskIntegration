@@ -155,15 +155,19 @@ module.exports = async function (context, myTimer) {
                             let existingTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
 
                             if (existingTicket) {
-                                let updateNote = {
-                                    "TicketID": existingTicket.id,
-                                    "Title": "New Alert",
-                                    "Description": description,
-                                    "NoteType": 1,
-                                    "Publish": 1
+                                if (!existingTicket.description.includes(alert.id)) {
+                                    let updateNote = {
+                                        "TicketID": existingTicket.id,
+                                        "Title": "New Alert",
+                                        "Description": description,
+                                        "NoteType": 1,
+                                        "Publish": 1
+                                    }
+                                    await api.TicketNotes.create(existingTicket.id, updateNote);
+                                    context.log("New ticket note added on ticket id: " + existingTicket.id);
+                                } else {
+                                    context.log("Skipped adding ticket note on ticket id (ticket is for this alert already):" + existingTicket.id);
                                 }
-                                await api.TicketNotes.create(existingTicket.id, updateNote);
-                                context.log("New ticket note added on ticket id: " + existingTicket.id);
                             }
                         } else {
                             // No existing ticket found, create a new one

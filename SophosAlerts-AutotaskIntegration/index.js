@@ -136,25 +136,6 @@ module.exports = async function (context, myTimer) {
                             autotaskID = orgMapping[sophosCompany];
                         }
 
-                        // Get primary location and default contract
-                        var contractID = null;
-                        var location = null;
-                        if (useAutotaskAPI) {
-                            contractID = await getAutotaskContractID(api, autotaskID);
-                            location = await getAutotaskLocation(api, autotaskID);
-                        }
-
-                        // Get related device if applicable
-                        var customerDevices = alertDevices[alert.customer_id];
-                        var alertDevice = null;
-                        if (customerDevices && customerDevices.length > 0) {
-                            alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
-                        }
-                        var deviceID = null;
-                        if (useAutotaskAPI && alertDevice) {
-                            deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);
-                        }
-
                         var when = new Date(alert.when);
                         var description = `${alert.description} \nSeverity: ${alert.severity} \nCompany: ${sophosCompany} \nDevice: ${alert.location}`;
                         if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
@@ -188,6 +169,25 @@ module.exports = async function (context, myTimer) {
                             // No existing ticket found, create a new one
                             if (process.env.HOW_TO_DOCUMENTATION_LINK) {
                                 description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
+                            }
+
+                            // Get primary location and default contract
+                            var contractID = null;
+                            var location = null;
+                            if (useAutotaskAPI) {
+                                contractID = await getAutotaskContractID(api, autotaskID);
+                                location = await getAutotaskLocation(api, autotaskID);
+                            }
+
+                            // Get related device if applicable
+                            var customerDevices = alertDevices[alert.customer_id];
+                            var alertDevice = null;
+                            if (customerDevices && customerDevices.length > 0) {
+                                alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
+                            }
+                            var deviceID = null;
+                            if (useAutotaskAPI && alertDevice) {
+                                deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);
                             }
 
                             var title = `Sophos Alert: "${alert.description}"`;

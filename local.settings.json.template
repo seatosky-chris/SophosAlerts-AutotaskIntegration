@@ -23,6 +23,9 @@
     "TICKET_SubIssueType": "",
     "TICKET_ServiceLevelAgreementID": "",
 
+    "IGNORE_AlertTypes": "",
+    "SKIP_SelfHealing_TicketIDs": "",
+
     "HOW_TO_DOCUMENTATION_LINK": ""
   }
 }

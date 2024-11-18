@@ -44,7 +44,13 @@ module.exports = async function (context, myTimer) {
 
     if (process.env.IGNORE_AlertTypes) {
         ignoredAlertTypes = process.env.IGNORE_AlertTypes.split(',');
-        ignoredAlertTypes.map(a => a.trim());
+        ignoredAlertTypes = ignoredAlertTypes.map(a => a.trim());
+    }
+
+    var skipSelfHealingTickets = [];
+    if (process.env.SKIP_SelfHealing_TicketIDs) {
+        skipSelfHealingTickets = process.env.SKIP_SelfHealing_TicketIDs.split(',')
+        skipSelfHealingTickets = skipSelfHealingTickets.map(a => parseInt(a.trim()));
     }
     
     let sophosToken = await getSophosToken(context);
@@ -251,6 +257,11 @@ module.exports = async function (context, myTimer) {
                                 let downTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
 
                                 if (downTicket) {
+                                    if (skipSelfHealingTickets.includes(downTicket.id)) {
+                                        context.log("Skipped self healing of ticket id: " + downTicket.id)
+                                        continue;
+                                    }
+                                    
                                     let closingNote = {
                                         "TicketID": downTicket.id,
                                         "Title": "Self-Healing Update",

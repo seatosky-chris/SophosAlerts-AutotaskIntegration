@@ -1,358 +1,367 @@
+const { app } = require('@azure/functions');
 const {AutotaskRestApi} = require('@apigrate/autotask-restapi');
-const fetch = require("node-fetch-commonjs");
 const { RateLimit } = require('async-sema');
 var fs = require('fs');
 const orgMapping = require('../OrgMapping.json');
 const upDownEvents = require('../UpDownEvents.json');
 var idRegex = /ID: ([0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12})(\n| )/gm
 
-module.exports = async function (context, myTimer) {
-    var timeStamp = new Date().toISOString();
-    var lastRun = false
-    var lastRunUnixTimestamp = false;
-    var lastRunDir = null;
-    var ignoredAlertTypes = [];
+app.timer('SophosAlerts-AutotaskIntegration', {
+    schedule: "0 */10 * * * *",
+    handler: async (myTimer, context) => {
+        var timeStamp = new Date().toISOString();
+        var lastRun = false
+        var lastRunUnixTimestamp = false;
+        var lastRunDir = null;
+        var ignoredAlertTypes = [];
 
 
-    if (fs.existsSync("C:/home/data")) {
-        // linux / live azure function
-        context.log("Using lastRun in C:/home/data");
-        lastRunDir = "C:/home/data/lastRun.dat";
-    } else {
-        // windows
-        context.log("Using local lastRun file");
-        lastRunDir = "lastRun.dat";
-    }
-
-    try {
-        await fs.promises.access(lastRunDir);
-        lastRun = new Date(fs.readFileSync(lastRunDir, 'utf-8'));
-    } catch (error) {
-        // New run
-        context.log.warn("This script has never been ran before.");
-    }
-
-    if (lastRun && lastRun instanceof Date) {
-        lastRunUnixTimestamp = Math.floor(lastRun.getTime() / 1000);
-
-        // if timestamp is more than 24 hours old, set to false (we can't go over 24 hours)
-        var curTimeStamp = Math.round(new Date().getTime() / 1000);
-        if (lastRunUnixTimestamp < (curTimeStamp - (24 * 3600))) {
-            lastRunUnixTimestamp = false;
+        if (fs.existsSync("C:/home/data")) {
+            // linux / live azure function
+            context.log("Using lastRun in C:/home/data");
+            lastRunDir = "C:/home/data/lastRun.dat";
+        } else {
+            // windows
+            context.log("Using local lastRun file");
+            lastRunDir = "lastRun.dat";
         }
-    }
 
-    if (process.env.IGNORE_AlertTypes) {
-        ignoredAlertTypes = process.env.IGNORE_AlertTypes.split(',');
-        ignoredAlertTypes = ignoredAlertTypes.map(a => a.trim());
-    }
+        try {
+            await fs.promises.access(lastRunDir);
+            lastRun = new Date(fs.readFileSync(lastRunDir, 'utf-8'));
+        } catch (error) {
+            // New run
+            context.warn("This script has never been ran before.");
+        }
 
-    var skipSelfHealingTickets = [];
-    if (process.env.SKIP_SelfHealing_TicketIDs) {
-        skipSelfHealingTickets = process.env.SKIP_SelfHealing_TicketIDs.split(',')
-        skipSelfHealingTickets = skipSelfHealingTickets.map(a => parseInt(a.trim()));
-    }
-    
-    let sophosToken = await getSophosToken(context);
+        if (lastRun && lastRun instanceof Date) {
+            lastRunUnixTimestamp = Math.floor(lastRun.getTime() / 1000);
+            context.log("Last run: " + lastRunUnixTimestamp.toString());
 
-    let sophosJWT = false;
-    if (sophosToken && sophosToken.access_token) {
-        sophosJWT = sophosToken.access_token;
-    }
+            // if timestamp is more than 24 hours old, set to false (we can't go over 24 hours)
+            var curTimeStamp = Math.round(new Date().getTime() / 1000);
+            if (lastRunUnixTimestamp < (curTimeStamp - (24 * 3600))) {
+                lastRunUnixTimestamp = false;
+                context.log("Last run is more than 24 hours old")
+            }
+        }
 
-    if (sophosJWT) {
-        var sophosPartnerID = await getSophosPartnerID(context, sophosJWT);
+        if (process.env.IGNORE_AlertTypes) {
+            ignoredAlertTypes = process.env.IGNORE_AlertTypes.split(',');
+            ignoredAlertTypes = ignoredAlertTypes.map(a => a.trim());
+        }
 
-        if (sophosPartnerID) {
-            // Get list of tenants, we need to handle each on an individual basis
-            var sophosTenants = await getSophosTenants(context, sophosJWT, sophosPartnerID);
+        var skipSelfHealingTickets = [];
+        if (process.env.SKIP_SelfHealing_TicketIDs) {
+            skipSelfHealingTickets = process.env.SKIP_SelfHealing_TicketIDs.split(',')
+            skipSelfHealingTickets = skipSelfHealingTickets.map(a => parseInt(a.trim()));
+        }
+        
+        let sophosToken = await getSophosToken(context);
 
-            if (sophosTenants && sophosTenants.items) {
-                await timeout(1000); // wait a second to prevent rate limiting
-                let alerts = await getSophosSiemAlerts(context, sophosJWT, sophosTenants, lastRunUnixTimestamp);
+        let sophosJWT = false;
+        if (sophosToken && sophosToken.access_token) {
+            sophosJWT = sophosToken.access_token;
+        }
 
-                if (alerts && alerts.length > 0) {
-                    var filteredAlerts = alerts.filter(alert => alert.severity != "low");
-                    var upAlerts = alerts.filter(alert => alert.severity == "low" && Object.keys(upDownEvents).includes(alert.type));
+        if (sophosJWT) {
+            var sophosPartnerID = await getSophosPartnerID(context, sophosJWT);
 
-                    // Connect to the Autotask API
-                    const autotask = new AutotaskRestApi(
-                        process.env.AUTOTASK_USER,
-                        process.env.AUTOTASK_SECRET, 
-                        process.env.AUTOTASK_INTEGRATION_CODE 
-                    );
-                    let api = await autotask.api();
+            if (sophosPartnerID) {
+                // Get list of tenants, we need to handle each on an individual basis
+                var sophosTenants = await getSophosTenants(context, sophosJWT, sophosPartnerID);
 
-                    // Verify the Autotask API key works (the library doesn't always provide a nice error message)
-                    var useAutotaskAPI = true;
-                    try {
-                        let fetchParms = {
-                            method: 'GET',
-                            headers: {
-                            "Content-Type": "application/json",
-                            "User-Agent": "Apigrate/1.0 autotask-restapi NodeJS connector"
-                            }
-                        };
-                        fetchParms.headers.ApiIntegrationcode = process.env.AUTOTASK_INTEGRATION_CODE;
-                        fetchParms.headers.UserName =  process.env.AUTOTASK_USER;
-                        fetchParms.headers.Secret = process.env.AUTOTASK_SECRET;
+                if (sophosTenants && sophosTenants.items) {
+                    await timeout(1000); // wait a second to prevent rate limiting
+                    let alerts = await getSophosSiemAlerts(context, sophosJWT, sophosTenants, lastRunUnixTimestamp);
 
-                        let test_url = `${autotask.zoneInfo ? autotask.zoneInfo.url : autotask.base_url}V${autotask.version}/Companies/entityInformation`;
-                        let response = await fetch(`${test_url}`, fetchParms);
-                        if(!response.ok){
-                            var result = await response.text();
-                            if (!result) {
-                                result = `${response.status} - ${response.statusText}`;
-                            }
-                            throw result;
-                        }
-                    } catch (error) {
-                        if (error.startsWith("401")) {
-                            error = `API Key Unauthorized. (${error})`
-                        }
-                        context.log.error(error);
-                        useAutotaskAPI = false;
-                    }
+                    if (alerts && alerts.length > 0) {
+                        var filteredAlerts = alerts.filter(alert => alert.severity != "low");
+                        var upAlerts = alerts.filter(alert => alert.severity == "low" && Object.keys(upDownEvents).includes(alert.type));
 
-                    var alertTenants = filteredAlerts.map(function(alert) {
-                        return alert.customer_id;
-                    });
-                    alertTenants = [...new Set(alertTenants)]
 
-                    let alertDevices = {};
-                    for (i = 0; i < alertTenants.length; i++) {
-                        var tenantID = alertTenants[i];
-                        let sophosTenant = sophosTenants.items.filter(t => t.id == tenantID)[0];
-                        let deviceIDs = filteredAlerts.filter(alert => alert.customer_id == tenantID).map(function(alert) {
-                            return alert.data.endpoint_id;
-                        });
+                        // Connect to the Autotask API
+                        const autotask = new AutotaskRestApi(
+                            process.env.AUTOTASK_USER,
+                            process.env.AUTOTASK_SECRET, 
+                            process.env.AUTOTASK_INTEGRATION_CODE 
+                        );
 
-                        var devices = await getSophosDevices(context, sophosJWT, sophosTenant, deviceIDs);
-                        if (devices && devices.items) {
-                            alertDevices[tenantID] = devices.items;
-                        }
-                    }
-
-                    for (i = 0; i < filteredAlerts.length; i++) {
-                        var alert = filteredAlerts[i];
-                        // Go through each alert (that isn't low severity) and create a new ticket in Autotask for it
-                        let sophosCompany = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0].name;
-                        let autotaskID = 0;
-                        if (sophosCompany) {
-                            autotaskID = orgMapping[sophosCompany];
-                        }
-
-                        var when = new Date(alert.when);
-                        var description = `${alert.description} \nSeverity: ${alert.severity} \nCompany: ${sophosCompany} \nDevice: ${alert.location}`;
-                        if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
-                            description += `\nIP: ${alert.data.source_info.ip}`;
-                        }
-                        description += `\nEvent Type: ${alert.type} \nID: ${alert.id} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
-
-                        // See if there are any existing tickets of this type and for this device
-                        let tickets = null;
-                        if (useAutotaskAPI) {
-                            tickets = await searchAutotaskTickets(context, api, autotaskID, "Sophos Alert: ", alert.location, alert.type);
-                        }
-
-                        if (tickets && tickets.length > 0) {
-                            // Existing ticket found, add notes
-                            // get latest ticket
-                            let existingTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
-
-                            if (existingTicket) {
-                                if (!existingTicket.description.includes(alert.id)) {
-                                    let updateNote = {
-                                        "TicketID": existingTicket.id,
-                                        "Title": "New Alert",
-                                        "Description": description,
-                                        "NoteType": 1,
-                                        "Publish": 1
-                                    }
-                                    await api.TicketNotes.create(existingTicket.id, updateNote);
-                                    context.log("New ticket note added on ticket id: " + existingTicket.id);
-                                } else {
-                                    context.log("Skipped adding ticket note on ticket id (ticket is for this alert already):" + existingTicket.id);
+                        // Verify the Autotask API key works (the library doesn't always provide a nice error message)
+                        var useAutotaskAPI = true;
+                        var autotaskTest = await autotask.Companies.get(0); // we need to do a call for the autotask module to get the zone info
+                        try {
+                            let fetchParms = {
+                                method: 'GET',
+                                headers: {
+                                "Content-Type": "application/json",
+                                "User-Agent": "Apigrate/1.0 autotask-restapi NodeJS connector"
                                 }
-                            }
-                        } else {
-                            // No existing ticket found, create a new one
-                            if (process.env.HOW_TO_DOCUMENTATION_LINK) {
-                                description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
-                            }
-
-                            // Get primary location and default contract
-                            var contractID = null;
-                            var location = null;
-                            if (useAutotaskAPI) {
-                                contractID = await getAutotaskContractID(api, autotaskID);
-                                location = await getAutotaskLocation(api, autotaskID);
-                            }
-
-                            // Get related device if applicable
-                            var customerDevices = alertDevices[alert.customer_id];
-                            var alertDevice = null;
-                            if (customerDevices && customerDevices.length > 0) {
-                                alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
-                            }
-                            var deviceID = null;
-                            if (useAutotaskAPI && alertDevice) {
-                                deviceID = await getAutotaskDevice(api, autotaskID, alertDevice);
-                            }
-
-                            var title = `Sophos Alert: "${alert.description}"`;
-                            var includeAlertLocation = false;
-                            if (!title.includes(alert.location)) {
-                                title = title + ` on "${alert.location}"`;
-                                includeAlertLocation = true;
-                            }
-                            var titleLength = title.length;
-                            if (titleLength > 140) {
-                                // title is too long, lets cut it down to 140 characters
-                                var cutOff = titleLength - 140;
-                                var cutDescription = alert.description.substring(0, (alert.description.length - cutOff) - 3) + "...";
-                                var title = `Sophos Alert: "${cutDescription}"`;
-                                if (includeAlertLocation) {
-                                    title = title + ` on "${alert.location}"`;
-                                }
-                            }
-                            
-                            // Make a new ticket
-                            let newTicket = {
-                                CompanyID: autotaskID,
-                                CompanyLocationID: (location ? location.id : 10),
-                                Priority: alert.severity == 'medium' ? 3 : 2,
-                                Status: 1,
-                                QueueID: parseInt(process.env.TICKET_QueueID),
-                                IssueType: parseInt(process.env.TICKET_IssueType),
-                                SubIssueType: parseInt(process.env.TICKET_SubIssueType),
-                                ServiceLevelAgreementID: parseInt(process.env.TICKET_ServiceLevelAgreementID),
-                                ContractID: (contractID ? contractID : null),
-                                Title: title,
-                                Description: description
                             };
-                            if (deviceID) {
-                                newTicket.ConfigurationItemID = deviceID;
+                            fetchParms.headers.ApiIntegrationcode = process.env.AUTOTASK_INTEGRATION_CODE;
+                            fetchParms.headers.UserName =  process.env.AUTOTASK_USER;
+                            fetchParms.headers.Secret = process.env.AUTOTASK_SECRET;
+
+                            let test_url = `${autotask.zoneInfo ? autotask.zoneInfo.url : autotask.base_url}V${autotask.version}/Companies/entityInformation`;
+                            let response = await fetch(`${test_url}`, fetchParms);
+                            if(!response.ok){
+                                var result = await response.text();
+                                if (!result) {
+                                    result = `${response.status} - ${response.statusText}`;
+                                }
+                                throw result;
+                            } else {
+                                context.log(`Successfully connected to Autotask. (${response.status} - ${response.statusText})`)
                             }
-
-                            await createAutotaskTicket(context, api, newTicket);
+                        } catch (error) {
+                            if (error.startsWith("401")) {
+                                error = `API Key Unauthorized. (${error})`
+                            }
+                            context.error(error);
+                            useAutotaskAPI = false;
                         }
-                    };
 
-                    // Close tickets on up alerts
-                    if (useAutotaskAPI) {
-                        for (i = 0; i < upAlerts.length; i++) {
-                            var alert = upAlerts[i];
-                            // Go through each up alert and find the relevant ticket in Autotask then self-heal it
-                            var sophosTenant = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0];
-                            let sophosCompany = sophosTenant.name;
+                        var alertTenants = filteredAlerts.map(function(alert) {
+                            return alert.customer_id;
+                        });
+                        alertTenants = [...new Set(alertTenants)]
+
+                        let alertDevices = {};
+                        for (i = 0; i < alertTenants.length; i++) {
+                            var tenantID = alertTenants[i];
+                            let sophosTenant = sophosTenants.items.filter(t => t.id == tenantID)[0];
+                            let deviceIDs = filteredAlerts.filter(alert => alert.customer_id == tenantID).map(function(alert) {
+                                return alert.data.endpoint_id;
+                            });
+
+                            var devices = await getSophosDevices(context, sophosJWT, sophosTenant, deviceIDs);
+                            if (devices && devices.items) {
+                                alertDevices[tenantID] = devices.items;
+                            }
+                        }
+
+                        for (i = 0; i < filteredAlerts.length; i++) {
+                            var alert = filteredAlerts[i];
+                            // Go through each alert (that isn't low severity) and create a new ticket in Autotask for it
+                            let sophosCompany = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0].name;
                             let autotaskID = 0;
                             if (sophosCompany) {
                                 autotaskID = orgMapping[sophosCompany];
                             }
-                            
-                            let tickets = await searchAutotaskTickets(context, api, autotaskID, "Sophos Alert: ", alert.location, upDownEvents[alert.type]);
+
+                            var when = new Date(alert.when);
+                            var description = `${alert.description} \nSeverity: ${alert.severity} \nCompany: ${sophosCompany} \nDevice: ${alert.location}`;
+                            if (alert.data && alert.data.source_info && alert.data.source_info.ip) {
+                                description += `\nIP: ${alert.data.source_info.ip}`;
+                            }
+                            description += `\nEvent Type: ${alert.type} \nID: ${alert.id} \nWhen: ${when.toLocaleDateString('en-us', { weekday:"long", year:"numeric", month:"short", day:"numeric"})} \n\nSee the Sophos portal for more details.`;
+
+                            // See if there are any existing tickets of this type and for this device
+                            let tickets = null;
+                            if (useAutotaskAPI) {
+                                tickets = await searchAutotaskTickets(context, autotask, autotaskID, "Sophos Alert: ", alert.location, alert.type);
+                            }
+
                             if (tickets && tickets.length > 0) {
+                                // Existing ticket found, add notes
                                 // get latest ticket
-                                let downTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
+                                let existingTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
 
-                                if (downTicket) {
-                                    if (skipSelfHealingTickets.includes(downTicket.id)) {
-                                        context.log("Skipped self healing of ticket id: " + downTicket.id)
-                                        continue;
+                                if (existingTicket) {
+                                    if (!existingTicket.description.includes(alert.id)) {
+                                        let updateNote = {
+                                            "TicketID": existingTicket.id,
+                                            "Title": "New Alert",
+                                            "Description": description,
+                                            "NoteType": 1,
+                                            "Publish": 1
+                                        }
+                                        await autotask.TicketNotes.create(existingTicket.id, updateNote);
+                                        context.log("New ticket note added on ticket id: " + existingTicket.id);
+                                    } else {
+                                        context.log("Skipped adding ticket note on ticket id (ticket is for this alert already):" + existingTicket.id);
                                     }
-                                    
-                                    let closingNote = {
-                                        "TicketID": downTicket.id,
-                                        "Title": "Self-Healing Update",
-                                        "Description": "[Self-Healing] " + alert.description,
-                                        "NoteType": 1,
-                                        "Publish": 1
-                                    }
-                                    await api.TicketNotes.create(downTicket.id, closingNote);
+                                }
+                            } else {
+                                // No existing ticket found, create a new one
+                                if (process.env.HOW_TO_DOCUMENTATION_LINK) {
+                                    description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
+                                }
 
-                                    let closingTicket = {
-                                        "id": downTicket.id,
-                                        "Status": (downTicket.assignedResourceID ? 13 : 5)
-                                    }
-                                    await api.Tickets.update(closingTicket);
+                                // Get primary location and default contract
+                                var contractID = null;
+                                var location = null;
+                                if (useAutotaskAPI) {
+                                    contractID = await getAutotaskContractID(autotask, autotaskID);
+                                    location = await getAutotaskLocation(autotask, autotaskID);
+                                }
 
-                                    // Close sophos down alert
-                                    var alertIDMatches = idRegex.exec(downTicket.description);
+                                // Get related device if applicable
+                                var customerDevices = alertDevices[alert.customer_id];
+                                var alertDevice = null;
+                                if (customerDevices && customerDevices.length > 0) {
+                                    alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
+                                }
+                                var deviceID = null;
+                                if (useAutotaskAPI && alertDevice) {
+                                    deviceID = await getAutotaskDevice(autotask, autotaskID, alertDevice);
+                                }
+                                var title = `Sophos Alert: "${alert.description}"`;
+                                var includeAlertLocation = false;
+                                if (!title.includes(alert.location)) {
+                                    title = title + ` on "${alert.location}"`;
+                                    includeAlertLocation = true;
+                                }
+                                var titleLength = title.length;
+                                if (titleLength > 140) {
+                                    // title is too long, lets cut it down to 140 characters
+                                    var cutOff = titleLength - 140;
+                                    var cutDescription = alert.description.substring(0, (alert.description.length - cutOff) - 3) + "...";
+                                    var title = `Sophos Alert: "${cutDescription}"`;
+                                    if (includeAlertLocation) {
+                                        title = title + ` on "${alert.location}"`;
+                                    }
+                                }
+                                
+                                // Make a new ticket
+                                let newTicket = {
+                                    CompanyID: autotaskID,
+                                    CompanyLocationID: (location ? location.id : 10),
+                                    Priority: alert.severity == 'medium' ? 3 : 2,
+                                    Status: 1,
+                                    QueueID: parseInt(process.env.TICKET_QueueID),
+                                    IssueType: parseInt(process.env.TICKET_IssueType),
+                                    SubIssueType: parseInt(process.env.TICKET_SubIssueType),
+                                    ServiceLevelAgreementID: parseInt(process.env.TICKET_ServiceLevelAgreementID),
+                                    ContractID: (contractID ? contractID : null),
+                                    Title: title,
+                                    Description: description
+                                };
+                                if (deviceID) {
+                                    newTicket.ConfigurationItemID = deviceID;
+                                }
+
+                            await createAutotaskTicket(context, autotask, newTicket);
+                            }
+                        };
+
+                        // Close tickets on up alerts
+                        if (useAutotaskAPI) {
+                            for (i = 0; i < upAlerts.length; i++) {
+                                var alert = upAlerts[i];
+                                context.log("Processing UP alert: " + alert.id)
+                                // Go through each up alert and find the relevant ticket in Autotask then self-heal it
+                                var sophosTenant = (sophosTenants.items.filter(tenant => tenant.id == alert.customer_id))[0];
+                                let sophosCompany = sophosTenant.name;
+                                let autotaskID = 0;
+                                if (sophosCompany) {
+                                    autotaskID = orgMapping[sophosCompany];
+                                }
+                                
+                                let tickets = await searchAutotaskTickets(context, autotask, autotaskID, "Sophos Alert: ", alert.location, upDownEvents[alert.type]);
+                                if (tickets && tickets.length > 0) {
+                                    context.log("Existing Tickets: " + tickets.length)
+                                    // get latest ticket
+                                    let downTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
+
+                                    if (downTicket) {
+                                        if (skipSelfHealingTickets.includes(downTicket.id)) {
+                                            context.log("Skipped self healing of ticket id: " + downTicket.id)
+                                            continue;
+                                        }
+                                        
+                                        let closingNote = {
+                                            "TicketID": downTicket.id,
+                                            "Title": "Self-Healing Update",
+                                            "Description": "[Self-Healing] " + alert.description,
+                                            "NoteType": 1,
+                                            "Publish": 1
+                                        }
+                                        await autotask.TicketNotes.create(downTicket.id, closingNote);
+
+                                        let closingTicket = {
+                                            "id": downTicket.id,
+                                            "Status": (downTicket.assignedResourceID ? 13 : 5)
+                                        }
+                                        await autotask.Tickets.update(closingTicket);
+
+                                        // Close sophos down alert
+                                        var alertIDMatches = idRegex.exec(downTicket.description);
+                                        if (alertIDMatches) {
+                                            var alertID = alertIDMatches[1];
+                                            if (alertID) {
+                                                closeSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                                context.log("Closed the Sophos down alert.")
+                                            }
+                                        }
+
+                                        // Close sophos up alert
+                                        closeSophosAlert(context, sophosJWT, sophosTenant, alert.id);
+                                        context.log("Closed the Sophos up alert.")
+                                    } else {
+                                        context.log("No latest down ticket found.")
+                                    }
+                                }
+                            }
+
+                            // Close tickets where the original alert no longer exists (closed but we don't get an up alert)
+                            var allSophosAlertTickets = await searchAutotaskTickets(context, autotask, false, "Sophos Alert: ");
+                            if (allSophosAlertTickets && allSophosAlertTickets.length > 0) {
+                                for (i = 0; i < allSophosAlertTickets.length; i++) {
+                                    var alertTicket = allSophosAlertTickets[i];
+                                    var alertIDMatches = idRegex.exec(alertTicket.description);
                                     if (alertIDMatches) {
                                         var alertID = alertIDMatches[1];
                                         if (alertID) {
-                                            closeSophosAlert(context, sophosJWT, sophosTenant, alertID);
-                                            context.log("Closed the Sophos down alert.")
-                                        }
-                                    }
+                                            var sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
+                                            var sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
 
-                                    // Close sophos up alert
-                                    closeSophosAlert(context, sophosJWT, sophosTenant, alert.id);
-                                    context.log("Closed the Sophos up alert.")
-                                } else {
-                                    context.log("No latest down ticket found.")
-                                }
-                            }
-                        }
-
-                        // Close tickets where the original alert no longer exists (closed but we don't get an up alert)
-                        var allSophosAlertTickets = await searchAutotaskTickets(context, api, false, "Sophos Alert: ");
-                        if (allSophosAlertTickets && allSophosAlertTickets.length > 0) {
-                            for (i = 0; i < allSophosAlertTickets.length; i++) {
-                                var alertTicket = allSophosAlertTickets[i];
-                                var alertIDMatches = idRegex.exec(alertTicket.description);
-                                if (alertIDMatches) {
-                                    var alertID = alertIDMatches[1];
-                                    if (alertID) {
-                                        var sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
-                                        var sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
-
-                                        if (!sophosTenant || sophosTenant == undefined) {
-                                            continue
-                                        }
-
-                                        sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
-                                        context.log("Alert: " + sophosAlert);
-                                        
-                                        if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
-                                            // Alert in Sophos has been closed, self-heal the related ticket
-                                            let closingNote = {
-                                                "TicketID": alertTicket.id,
-                                                "Title": "Self-Healing Update",
-                                                "Description": "[Self-Healing] The Sophos alert is no longer open. Self-healing this ticket.",
-                                                "NoteType": 1,
-                                                "Publish": 1
+                                            if (!sophosTenant || sophosTenant == undefined) {
+                                                continue
                                             }
-                                            await api.TicketNotes.create(alertTicket.id, closingNote);
-            
-                                            let closingTicket = {
-                                                "id": alertTicket.id,
-                                                "Status": (alertTicket.assignedResourceID ? 13 : 5)
+
+                                            sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                            context.log("Alert: " + sophosAlert);
+                                            
+                                            if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
+                                                // Alert in Sophos has been closed, self-heal the related ticket
+                                                let closingNote = {
+                                                    "TicketID": alertTicket.id,
+                                                    "Title": "Self-Healing Update",
+                                                    "Description": "[Self-Healing] The Sophos alert is no longer open. Self-healing this ticket.",
+                                                    "NoteType": 1,
+                                                    "Publish": 1
+                                                }
+                                                await autotask.TicketNotes.create(alertTicket.id, closingNote);
+                
+                                                let closingTicket = {
+                                                    "id": alertTicket.id,
+                                                    "Status": (alertTicket.assignedResourceID ? 13 : 5)
+                                                }
+                                                await autotask.Tickets.update(closingTicket);
                                             }
-                                            await api.Tickets.update(closingTicket);
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                try {
-                    fs.writeFile(lastRunDir, timeStamp, function(err) {
-                        if (err) throw err;
-                    });
-                    context.log("Updated lastRun.dat to: " + timeStamp);
-                } catch (error) {
-                    context.log.error("Could not update lastRun.dat: " + error);
+                    try {
+                        fs.writeFile(lastRunDir, timeStamp, function(err) {
+                            if (err) throw err;
+                        });
+                        context.log("Updated lastRun.dat to: " + timeStamp);
+                    } catch (error) {
+                        context.error("Could not update lastRun.dat: " + error);
+                    }
                 }
             }
         }
-    }
 
-    context.log('JavaScript timer trigger function ran!', timeStamp);
-};
+        context.log('JavaScript timer trigger function ran!', timeStamp);
+    }
+});
 
 function timeout(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -382,7 +391,7 @@ async function getSophosToken(context) {
         });
         return await sophosToken.json();
     } catch (error) {
-        context.log.error(error);
+        context.error(error);
         return null;
     }
 }
@@ -400,7 +409,7 @@ async function getSophosPartnerID(context, token) {
         let sophosPartnerInfoJson = await sophosPartnerInfo.json();
         return sophosPartnerInfoJson.id;
     } catch (error) {
-        context.log.warn(error);
+        context.warn(error);
         return null;
     }
 }
@@ -419,7 +428,7 @@ async function getSophosTenants(context, token, partnerID) {
         });
         sophosTenantsJson =  await sophosTenants.json();
     } catch (error) {
-        context.log.error(error);
+        context.error(error);
     }
 
     if (sophosTenantsJson && sophosTenantsJson.pages && sophosTenantsJson.pages.total > 1) {
@@ -436,7 +445,7 @@ async function getSophosTenants(context, token, partnerID) {
                 let sophosTenantsTempJson = await sophosTenantsTemp.json();
                 sophosTenantsJson.items = sophosTenantsJson.items.concat(sophosTenantsTempJson.items);
             } catch (error) {
-                context.log.error(error);
+                context.error(error);
             }
         }
     }
@@ -488,9 +497,9 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
             queryUrls.push({url, fetchHeader});
         });
     } catch (err) {
-        context.log.error(err); 
-        context.log.warn(tenants.items[0]);
-        context.log.warn(tenants.items);
+        context.error(err); 
+        context.warn(tenants.items[0]);
+        context.warn(tenants.items);
     }
 
     const limit = RateLimit(12);
@@ -500,9 +509,9 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
             .catch((error) => {
                 if (!retry) {
                     retryUrls.push({url, fetchHeader});
-                    context.log.warn(error);
+                    context.warn(error);
                 } else {
-                    context.log.error(error); 
+                    context.error(error); 
                 }
                 return;
             });
@@ -768,7 +777,7 @@ async function searchAutotaskTickets(context, autotaskAPI, companyID = false, ti
         }
         return null;
     } catch (error) {
-        context.log.error(error);
+        context.error(error);
     }
 }
 
@@ -809,10 +818,10 @@ async function createAutotaskTicket(context, autotaskAPI, newTicket) {
                 method: "POST",
                 body: JSON.stringify(mailBody)
             });
-            context.log.warn("Ticket creation failed. Backup email sent to support.");
+            context.warn("Ticket creation failed. Backup email sent to support.");
         } catch (error) {
-            context.log.error("Ticket creation failed. Sending an email as a backup also failed.");
-            context.log.error(error);
+            context.error("Ticket creation failed. Sending an email as a backup also failed.");
+            context.error(error);
         }
         ticketID = null;
     }

@@ -188,11 +188,9 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                     description += '\n\nHow To Documentation: ' + process.env.HOW_TO_DOCUMENTATION_LINK;
                                 }
 
-                                // Get primary location and default contract
-                                var contractID = null;
+                                // Get primary location
                                 var location = null;
                                 if (useAutotaskAPI) {
-                                    contractID = await getAutotaskContractID(autotask, autotaskID);
                                     location = await getAutotaskLocation(autotask, autotaskID);
                                 }
 
@@ -237,7 +235,6 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                     IssueType: parseInt(process.env.TICKET_IssueType),
                                     SubIssueType: parseInt(process.env.TICKET_SubIssueType),
                                     ServiceLevelAgreementID: parseInt(process.env.TICKET_ServiceLevelAgreementID),
-                                    ContractID: (contractID ? contractID : null),
                                     Title: title,
                                     Description: description
                                 };
@@ -660,35 +657,6 @@ async function getAutotaskLocation(autotaskAPI, autotaskID) {
     }
 
     return location;
-}
-
-async function getAutotaskContractID(autotaskAPI, autotaskID) {
-    var contractID = null;
-    let contract = await autotaskAPI.Contracts.query({
-        filter: [
-            {
-                "op": "and",
-                "items": [
-                    {
-                        "op": "eq",
-                        "field": "CompanyID",
-                        "value": autotaskID
-                    },
-                    {
-                        "op": "eq",
-                        "field": "IsDefaultContract",
-                        "value": true
-                    }
-                ]
-            }
-        ],
-        includeFields: [ "id" ]
-    });
-    
-    if (contract && contract.items.length > 0) {
-        contractID = contract.items[0].id
-    }
-    return contractID;
 }
 
 async function getAutotaskDevice(autotaskAPI, autotaskID, deviceDetails) {

@@ -1,6 +1,6 @@
 const { app } = require('@azure/functions');
 const {AutotaskRestApi} = require('@apigrate/autotask-restapi');
-const { RateLimit } = require('async-sema');
+const axios = require('axios');
 var fs = require('fs');
 const orgMapping = require('../OrgMapping.json');
 const upDownEvents = require('../UpDownEvents.json');
@@ -493,8 +493,14 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
                     method: "GET"
                 }
             };
+            let axiosHeader = {
+                headers: {
+                    Authorization: "Bearer " + token,
+                    "X-Tenant-ID": tenant.id,
+                }
+            };
 
-            queryUrls.push({url, fetchHeader});
+            queryUrls.push({url, fetchHeader, axiosHeader});
         });
     } catch (err) {
         context.error(err); 
@@ -502,40 +508,64 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
         context.warn(tenants.items);
     }
 
-    const limit = RateLimit(12);
-    const fetchFromApi = ({url, fetchHeader}, retry) => {
-        const response = fetch(url, fetchHeader)
-            .then((res) => res.json())
-            .catch((error) => {
-                if (!retry) {
-                    retryUrls.push({url, fetchHeader});
-                    context.warn(error);
-                } else {
-                    context.error(error); 
-                }
-                return;
-            });
-        return response;
-    };
-
     let alerts = [];
+    var i = 0;
+    let response;
+    let parsedJson;
     for (const query of queryUrls) {
-        await limit();
-        fetchFromApi(query, false).then((result) => {
-            if (result && result.items) {
-                alerts = alerts.concat(result.items);
+        i++;
+
+        try {
+            response = await axios.get(query.url, query.axiosHeader)
+            //response = await fetch(query.url, query.fetchHeader);
+            if (response) {
+                if (response && response.data.items) {
+                    alerts = alerts.concat(response.data.items);
+                }
+            } else {
             }
-        });
+        } catch (error) {
+            retryUrls.push(query);
+            context.log("Got error:" + error); 
+            context.warn(error); 
+
+            if (error.response) {
+                context.log(error.response.data);
+                context.log(error.response.status);
+                context.log(error.response.headers);
+            } else if (error.request) {
+                context.log(error.request);
+            } else {
+                context.log('Error', error.message);
+            }
+            context.log(error.config);
+        }
+
+        if (i % 10 === 0) {
+            await timeout(1000);
+        }
     }
 
     if (retryUrls && retryUrls.length > 0) {
+        var i = 0;
         for (const query of retryUrls) {
-            await limit();
-            fetchFromApi(query, true).then((result) => {
-                if (result && result.items) {
-                    alerts = alerts.concat(result.items);
+            i++;
+
+            try {
+                response = await fetch(query.url, query.fetchHeader);
+                if (response) {
+                    parsedJson = await response.json();
+                    if (parsedJson && parsedJson.items) {
+                        alerts = alerts.concat(parsedJson.items);
+                    }
                 }
-            });
+            } catch (error) {
+                context.error(error); 
+            }
+
+            if (i % 10 === 0) {
+                await timeout(1000);
+            }
         }
     }
 

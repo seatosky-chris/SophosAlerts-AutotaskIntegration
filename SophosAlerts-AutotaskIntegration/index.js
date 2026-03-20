@@ -222,6 +222,10 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                         title = title + ` on "${alert.location}"`;
                                     }
                                 }
+
+                                if (title.includes("detected ransomware")) {
+                                    description += '\n\n\n!!! A related RANSOMWARE email has been sent to notifications@seatosky.com. Check the email for more info.';
+                                }
                                 
                                 // Make a new ticket
                                 let newTicket = {
@@ -389,6 +393,11 @@ async function getSophosToken(context) {
             method: "POST",
             body: authBody
         });
+
+        if (!sophosToken.ok) {
+            throw new Error(`Error getting Sophos token! Error: ${sophosToken.status} ${sophosToken.statusText}`)
+        }
+
         return await sophosToken.json();
     } catch (error) {
         context.error(error);
@@ -406,6 +415,11 @@ async function getSophosPartnerID(context, token) {
                 method: "GET"
             }
         });
+
+        if (!sophosPartnerInfo.ok) {
+            throw new Error(`Error getting partner ID! Error: ${sophosPartnerInfo.status} ${sophosPartnerInfo.statusText}`)
+        }
+
         let sophosPartnerInfoJson = await sophosPartnerInfo.json();
         return sophosPartnerInfoJson.id;
     } catch (error) {
@@ -426,6 +440,11 @@ async function getSophosTenants(context, token, partnerID) {
                 method: "GET"
             }
         });
+
+        if (!sophosTenants.ok) {
+            throw new Error(`Error getting Sophos tenants! Error: ${sophosTenants.status} ${sophosTenants.statusText}`)
+        }
+
         sophosTenantsJson =  await sophosTenants.json();
     } catch (error) {
         context.error(error);

@@ -178,6 +178,7 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                         }
                                         await autotask.TicketNotes.create(existingTicket.id, updateNote);
                                         context.log("New ticket note added on ticket id: " + existingTicket.id);
+                                        await timeout(500); // wait a moment to prevent API throttling when creating multiple notes in a row
                                     } else {
                                         context.log("Skipped adding ticket note on ticket id (ticket is for this alert already):" + existingTicket.id);
                                     }
@@ -589,44 +590,65 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
 }
 
 async function getSophosAlert(context, token, tenant, alertID) {
-    let url = 'https://api-' + tenant.dataRegion + '.central.sophos.com/common/v1/alerts/' + alertID
+    const url = `https://api-${tenant.dataRegion}.central.sophos.com/common/v1/alerts/${alertID}`;
 
-    let fetchHeader = {
+    const fetchHeader = {
         method: "GET",
         headers: {
-            Authorization: "Bearer " + token,
+            "Authorization": `Bearer ${token}`,
             "X-Tenant-ID": tenant.id,
             "Accept": "application/json"
         }
     };
 
-    return fetch(url, fetchHeader)
-        .then((response) => response.json());
+    try {
+        const response = await fetch(url, fetchHeader);
+
+        if (response.status === 204 || !response.ok) {
+            return null; 
+        }
+
+        const text = await response.text();
+
+        return text ? JSON.parse(text) : null;
+    } catch (error) {
+        console.error(`Error fetching Sophos alert ${alertID}:`, error);
+        return null;
+    }
 }
 
 async function closeSophosAlert(context, token, tenant, alertID) {
     // Marks the alert as acknowledged
-    let url = 'https://api-' + tenant.dataRegion + '.central.sophos.com/common/v1/alerts/' + alertID + '/actions'
+    const url = `https://api-${tenant.dataRegion}.central.sophos.com/common/v1/alerts/${alertID}/actions`;
 
-    let requestBody = {        
+    const requestBody = {        
         action: "acknowledge",
         message: "Acknowledged by Autotask Integration"
     }
 
-    let fetchHeader = {
+    const fetchHeader = {
         method: "POST",
         headers: {
-            Authorization: "Bearer " + token,
+            "Authorization": `Bearer ${token}`,
             "X-Tenant-ID": tenant.id,
             "Accept": "application/json"
         },
         body: JSON.stringify(requestBody)
     };
 
-    let response = fetch(url, fetchHeader)
-        .then((response) => response.json());
+    try {
+        const response = await fetch(url, fetchHeader);
 
-    return;
+        if (response.status === 204 || !response.ok) {
+            return null;
+        }
+
+        const text = await response.text();
+        return text ? JSON.parse(text) : null;
+    } catch (error) {
+        console.error(`Error closing Sophos alert ${alertID}:`, error);
+        return null;
+    }
 }
 
 async function getAutotaskLocation(autotaskAPI, autotaskID) {

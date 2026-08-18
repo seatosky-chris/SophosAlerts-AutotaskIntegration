@@ -1,8 +1,8 @@
 {
-  "name": "sophosalerts-autotaskintegration",
+  "name": "sophosalerts_autotaskintegration",
   "version": "1.0.0",
   "description": "",
-  "main": "SophosAlerts-AutotaskIntegration/index.js",
+  "main": "SophosAlerts_AutotaskIntegration/index.js",
   "scripts": {
     "start": "func start",
     "test": "echo \"No tests yet...\""
@@ -10,6 +10,8 @@
   "dependencies": {
     "@apigrate/autotask-restapi": "^2.0.1",
     "@azure/functions": "^4.11.2",
+    "@azure/identity": "^4.13.1",
+    "@azure/storage-blob": "^12.33.0",
     "axios": "^1.13.6"
   }
 }

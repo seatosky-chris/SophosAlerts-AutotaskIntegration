@@ -1,45 +1,51 @@
 const { app } = require('@azure/functions');
 const {AutotaskRestApi} = require('@apigrate/autotask-restapi');
 const axios = require('axios');
-var fs = require('fs');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const { DefaultAzureCredential } = require('@azure/identity');
 const orgMapping = require('../OrgMapping.json');
 const upDownEvents = require('../UpDownEvents.json');
-var idRegex = /ID: ([0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12})(\n| )/gm
+var idRegex = /ID: ([0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12})(\n| )/m
 
-app.timer('SophosAlerts-AutotaskIntegration', {
+app.timer('SophosAlerts_AutotaskIntegration', {
     schedule: "0 */10 * * * *",
     handler: async (myTimer, context) => {
         var timeStamp = new Date().toISOString();
         var lastRun = false
         var lastRunUnixTimestamp = false;
-        var lastRunDir = null;
         var ignoredAlertTypes = [];
+        context.log("Starting SophosAlerts_AutotaskIntegration function at: " + timeStamp);
 
-
-        if (fs.existsSync("C:/home/data")) {
-            // linux / live azure function
-            context.log("Using lastRun in C:/home/data");
-            lastRunDir = "C:/home/data/lastRun.dat";
-        } else {
-            // windows
-            context.log("Using local lastRun file");
-            lastRunDir = "lastRun.dat";
-        }
+        // Initialize the client
+        const blobServiceClient = getBlobServiceClient();
+        const containerClient = blobServiceClient.getContainerClient("function-state");
+        const blockBlobClient = containerClient.getBlockBlobClient("lastRun.dat");
 
         try {
-            await fs.promises.access(lastRunDir);
-            lastRun = new Date(fs.readFileSync(lastRunDir, 'utf-8'));
+            const containerExists = await containerClient.exists();
+            if (containerExists && (await blockBlobClient.exists())) {
+                const downloadResponse = await blockBlobClient.downloadToBuffer();
+                lastRun = new Date(downloadResponse.toString("utf-8"));
+                context.log("Last run read from Blob Storage: " + lastRun.toISOString());
+            } else {
+                context.warn("This script has never been run before.");
+            }
         } catch (error) {
-            // New run
-            context.warn("This script has never been ran before.");
+            const errMessage = error && error.message ? error.message : String(error);
+            if (errMessage.includes('not supported by Azurite') || errMessage.includes('skipApiVersionCheck')) {
+                context.error('Azurite API version mismatch detected. Local Azurite is older than the Azure Storage SDK version in this project.');
+                context.error('Suggested startup command: npx azurite --skipApiVersionCheck');
+                context.error('Full error: ' + errMessage);
+                return;
+            }
+            context.error("Error reading lastRun state from Blob Storage: " + error);
         }
 
-        if (lastRun && lastRun instanceof Date) {
+        if (lastRun && !isNaN(lastRun.getTime())) {
             lastRunUnixTimestamp = Math.floor(lastRun.getTime() / 1000);
-            context.log("Last run: " + lastRunUnixTimestamp.toString());
 
-            // if timestamp is more than 24 hours old, set to false (we can't go over 24 hours)
-            var curTimeStamp = Math.round(new Date().getTime() / 1000);
+            // if timestamp is more than 24 hours old, reset (cannot exceed 24 hours)
+            var curTimeStamp = Math.round(Date.now() / 1000);
             if (lastRunUnixTimestamp < (curTimeStamp - (24 * 3600))) {
                 lastRunUnixTimestamp = false;
                 context.log("Last run is more than 24 hours old")
@@ -51,13 +57,15 @@ app.timer('SophosAlerts-AutotaskIntegration', {
             ignoredAlertTypes = ignoredAlertTypes.map(a => a.trim());
         }
 
-        var skipSelfHealingTickets = [];
+        /* var skipSelfHealingTickets = [];
         if (process.env.SKIP_SelfHealing_TicketIDs) {
             skipSelfHealingTickets = process.env.SKIP_SelfHealing_TicketIDs.split(',')
             skipSelfHealingTickets = skipSelfHealingTickets.map(a => parseInt(a.trim()));
-        }
+        } */
         
-        let sophosToken = await getSophosToken(context);
+        context.log("Starting Sophos alerts sync")
+        const sophosRateLimiter = createSophosRateLimiter(context, 7); // 7 requests per second to stay under the 10/sec limit
+        let sophosToken = await getSophosToken(context, sophosRateLimiter);
 
         let sophosJWT = false;
         if (sophosToken && sophosToken.access_token) {
@@ -65,11 +73,11 @@ app.timer('SophosAlerts-AutotaskIntegration', {
         }
 
         if (sophosJWT) {
-            var sophosPartnerID = await getSophosPartnerID(context, sophosJWT);
+            var sophosPartnerID = await getSophosPartnerID(context, sophosJWT, sophosRateLimiter);
 
             if (sophosPartnerID) {
                 // Get list of tenants, we need to handle each on an individual basis
-                var sophosTenants = await getSophosTenants(context, sophosJWT, sophosPartnerID);
+                var sophosTenants = await getSophosTenants(context, sophosJWT, sophosPartnerID, sophosRateLimiter);
 
                 if (sophosTenants && sophosTenants.items) {
                     await timeout(1000); // wait a second to prevent rate limiting
@@ -134,7 +142,7 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                 return alert.data.endpoint_id;
                             });
 
-                            var devices = await getSophosDevices(context, sophosJWT, sophosTenant, deviceIDs);
+                            var devices = await getSophosDevices(context, sophosJWT, sophosTenant, deviceIDs, sophosRateLimiter);
                             if (devices && devices.items) {
                                 alertDevices[tenantID] = devices.items;
                             }
@@ -267,10 +275,10 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                     let downTicket = tickets.reduce((a, b) => new Date(a.createDate) > new Date(b.createDate) ? a : b);
 
                                     if (downTicket) {
-                                        if (skipSelfHealingTickets.includes(downTicket.id)) {
+                                        /* if (skipSelfHealingTickets.includes(downTicket.id)) {
                                             context.log("Skipped self healing of ticket id: " + downTicket.id)
                                             continue;
-                                        }
+                                        } */
                                         
                                         let closingNote = {
                                             "TicketID": downTicket.id,
@@ -292,13 +300,13 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                         if (alertIDMatches) {
                                             var alertID = alertIDMatches[1];
                                             if (alertID) {
-                                                closeSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                                closeSophosAlert(context, sophosJWT, sophosTenant, alertID, sophosRateLimiter);
                                                 context.log("Closed the Sophos down alert.")
                                             }
                                         }
 
                                         // Close sophos up alert
-                                        closeSophosAlert(context, sophosJWT, sophosTenant, alert.id);
+                                        closeSophosAlert(context, sophosJWT, sophosTenant, alert.id, sophosRateLimiter);
                                         context.log("Closed the Sophos up alert.")
                                     } else {
                                         context.log("No latest down ticket found.")
@@ -315,14 +323,14 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                                     if (alertIDMatches) {
                                         var alertID = alertIDMatches[1];
                                         if (alertID) {
-                                            var sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
-                                            var sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
+                                            const sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID)
+                                            const sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
 
                                             if (!sophosTenant || sophosTenant == undefined) {
                                                 continue
                                             }
 
-                                            sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID);
+                                            sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID, sophosRateLimiter);
                                             context.log("Alert: " + sophosAlert);
                                             
                                             if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
@@ -350,12 +358,12 @@ app.timer('SophosAlerts-AutotaskIntegration', {
                     }
 
                     try {
-                        fs.writeFile(lastRunDir, timeStamp, function(err) {
-                            if (err) throw err;
-                        });
-                        context.log("Updated lastRun.dat to: " + timeStamp);
+                        // Ensures the container exists before attempting to write
+                        await containerClient.createIfNotExists();
+                        await blockBlobClient.uploadData(Buffer.from(timeStamp));
+                        context.log("Updated lastRun.dat in Blob Storage to: " + timeStamp);
                     } catch (error) {
-                        context.error("Could not update lastRun.dat: " + error);
+                        context.error("Could not update lastRun.dat in Blob Storage: " + error);
                     }
                 }
             }
@@ -365,15 +373,119 @@ app.timer('SophosAlerts-AutotaskIntegration', {
     }
 });
 
+function isLocalDevelopment() {
+  if (process.env.AZURE_FUNCTIONS_ENVIRONMENT === 'Development') {
+    return true;
+  }
+
+  const isAzureRuntime =
+    !!process.env.WEBSITE_SITE_NAME ||
+    !!process.env.WEBSITE_INSTANCE_ID ||
+    !!process.env.AzureWebJobsStorage__blobServiceUri ||
+    !!process.env.AzureWebJobsStorage__queueServiceUri;
+
+  return !isAzureRuntime;
+}
+
+function getBlobServiceClient() {
+    // Check if running locally
+    const isLocalDev = isLocalDevelopment();
+
+    // Local Development (Always force connection string / Azurite)
+    if (isLocalDev) {
+        return BlobServiceClient.fromConnectionString(
+            process.env.AzureWebJobsStorage || "UseDevelopmentStorage=true"
+        );
+    }
+
+    // Flex Consumption in Azure (Managed Identity)
+    if (process.env.AzureWebJobsStorage__blobServiceUri) {
+        const credential = new DefaultAzureCredential();
+
+        return new BlobServiceClient(
+            process.env.AzureWebJobsStorage__blobServiceUri,
+            credential
+        );
+    }
+    
+    // Standard Consumption in Azure (Connection String)
+    if (process.env.AzureWebJobsStorage) {
+        return BlobServiceClient.fromConnectionString(
+            process.env.AzureWebJobsStorage
+        );
+    }
+
+    throw new Error("No valid storage environment variables found.");
+}
+
 function timeout(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function createSophosRateLimiter(context, requestsPerSecond = 10) {
+    const minIntervalMs = Math.ceil(1000 / requestsPerSecond);
+    let lastRequestAt = 0;
+
+    return async function waitForSlot() {
+        const now = Date.now();
+        const elapsedMs = now - lastRequestAt;
+        const waitMs = Math.max(0, minIntervalMs - elapsedMs);
+
+        if (waitMs > 0) {
+            context && context.log && context.log(`Sophos rate limit: waiting ${waitMs}ms before next request`);
+            await timeout(waitMs);
+        }
+
+        lastRequestAt = Date.now();
+    };
+}
+
+async function sleepWithContext(context, ms, reason) {
+    if (reason) {
+        context && context.log && context.log(`Sophos ${reason}: waiting ${ms}ms before retrying`);
+    }
+    await timeout(ms);
+}
+
+async function runSophosRequestWithRetry(context, label, requestFn, options = {}) {
+    const maxAttempts = Math.max(1, Number(options.maxAttempts) || 3);
+    const backoffMs = Math.max(0, Number(options.backoffMs) || 2000);
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await requestFn(attempt);
+        } catch (error) {
+            lastError = error;
+            const status = error && error.response ? error.response.status : null;
+
+            if (status !== 429) {
+                throw error;
+            }
+
+            if (attempt < maxAttempts) {
+                context && context.warn && context.warn(`Sophos ${label} hit 429 on attempt ${attempt}/${maxAttempts}. Retrying in ${backoffMs}ms.`);
+                await sleepWithContext(context, backoffMs, '429 backoff');
+                continue;
+            }
+
+            context && context.warn && context.warn(`Sophos ${label} hit 429 on final attempt ${attempt}/${maxAttempts}. Stopping retries.`);
+            return null;
+        }
+    }
+
+    return null;
 }
 
 function getKeyByValue(object, value) {
     return Object.keys(object).find(key => object[key] == value);
 }
 
-async function getSophosToken(context) {
+async function getSophosToken(context, rateLimiter = null) {
+    if (rateLimiter) {
+        await rateLimiter();
+    }
+
     let url = 'https://id.sophos.com/api/v2/oauth2/token';
 
     var authBody = new URLSearchParams({
@@ -403,14 +515,18 @@ async function getSophosToken(context) {
     }
 }
 
-async function getSophosPartnerID(context, token) {
+async function getSophosPartnerID(context, token, rateLimiter = null) {
+    if (rateLimiter) {
+        await rateLimiter();
+    }
+
     let url = 'https://api.central.sophos.com/whoami/v1';
 
     try {
         let sophosPartnerInfo = await fetch(url, {
+            method: "GET",
             headers: {
                 Authorization: "Bearer " + token,
-                method: "GET"
             }
         });
 
@@ -426,16 +542,20 @@ async function getSophosPartnerID(context, token) {
     }
 }
 
-async function getSophosTenants(context, token, partnerID) {
+async function getSophosTenants(context, token, partnerID, rateLimiter = null) {
+    if (rateLimiter) {
+        await rateLimiter();
+    }
+
     let url = 'https://api.central.sophos.com/partner/v1/tenants?page';
     let sophosTenantsJson;
 
     try {
         let sophosTenants = await fetch(url + "Total=true", {
+            method: "GET",
             headers: {
                 Authorization: "Bearer " + token,
-                "X-Partner-ID": partnerID,
-                method: "GET"
+                "X-Partner-ID": partnerID
             }
         });
 
@@ -453,10 +573,10 @@ async function getSophosTenants(context, token, partnerID) {
         for (let i = 2; i <= totalPages; i++) {
             try {
                 let sophosTenantsTemp = await fetch(url + "=" + i, {
+                    method: "GET",
                     headers: {
                         Authorization: "Bearer " + token,
-                        "X-Partner-ID": partnerID,
-                        method: "GET"
+                        "X-Partner-ID": partnerID
                     }
                 });
                 let sophosTenantsTempJson = await sophosTenantsTemp.json();
@@ -470,7 +590,11 @@ async function getSophosTenants(context, token, partnerID) {
     return sophosTenantsJson;
 }
 
-async function getSophosDevices(context, token, tenant, ids = null) {
+async function getSophosDevices(context, token, tenant, ids = null, rateLimiter = null) {
+    if (rateLimiter) {
+        await rateLimiter();
+    }
+
     let url = tenant.apiHost + '/endpoint/v1/endpoints?pageSize=500';
 
     if (ids) {        
@@ -492,9 +616,10 @@ async function getSophosDevices(context, token, tenant, ids = null) {
         .then((response) => response.json());
 }
 
-async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
+async function getSophosSiemAlerts(context, token, tenants, fromDate = false, rateLimiter = null) {
     let queryUrls = [];
     let retryUrls = [];
+    const sophosRateLimiter = rateLimiter || createSophosRateLimiter(context, 7);
 
     try {
         tenants.items.filter(t => t !== undefined).filter(t => t.status && t.status == 'active').forEach(function(tenant) {
@@ -504,10 +629,10 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
             }
 
             let fetchHeader = {
+                method: "GET",
                 headers: {
                     Authorization: "Bearer " + token,
-                    "X-Tenant-ID": tenant.id,
-                    method: "GET"
+                    "X-Tenant-ID": tenant.id
                 }
             };
             let axiosHeader = {
@@ -526,62 +651,75 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
     }
 
     let alerts = [];
-    var i = 0;
     let response;
     let parsedJson;
     for (const query of queryUrls) {
-        i++;
+        await sophosRateLimiter();
 
         try {
-            response = await axios.get(query.url, query.axiosHeader)
-            //response = await fetch(query.url, query.fetchHeader);
-            if (response) {
-                if (response && response.data.items) {
-                    alerts = alerts.concat(response.data.items);
+            const requestFn = async () => {
+                const result = await axios.get(query.url, query.axiosHeader);
+                if (result && result.data && result.data.items) {
+                    return result.data.items;
                 }
-            } else {
+                return [];
+            };
+
+            const items = await runSophosRequestWithRetry(context, `SIEM alerts for ${query.url}`, requestFn, {
+                maxAttempts: 3,
+                backoffMs: 2000
+            });
+
+            if (Array.isArray(items)) {
+                alerts = alerts.concat(items);
             }
         } catch (error) {
             retryUrls.push(query);
-            context.log("Got error:" + error); 
-            context.warn(error); 
+            context.log("Got error:" + error);
+            context.warn(error);
 
-            if (error.response) {
+            if (error && error.response) {
                 context.log(error.response.data);
                 context.log(error.response.status);
                 context.log(error.response.headers);
-            } else if (error.request) {
+            } else if (error && error.request) {
                 context.log(error.request);
-            } else {
+            } else if (error) {
                 context.log('Error', error.message);
             }
-            context.log(error.config);
-        }
-
-        if (i % 10 === 0) {
-            await timeout(1000);
+            if (error && error.config) {
+                context.log(error.config);
+            }
         }
     }
 
     if (retryUrls && retryUrls.length > 0) {
-        var i = 0;
         for (const query of retryUrls) {
-            i++;
+            await sophosRateLimiter();
 
             try {
-                response = await fetch(query.url, query.fetchHeader);
-                if (response) {
-                    parsedJson = await response.json();
-                    if (parsedJson && parsedJson.items) {
-                        alerts = alerts.concat(parsedJson.items);
+                const requestFn = async () => {
+                    const response = await fetch(query.url, query.fetchHeader);
+                    if (response && response.status === 429) {
+                        const error = new Error('TooManyRequests');
+                        error.response = { status: 429 };
+                        throw error;
                     }
+
+                    const parsedJson = await response.json();
+                    return parsedJson && parsedJson.items ? parsedJson.items : [];
+                };
+
+                const items = await runSophosRequestWithRetry(context, `retry SIEM alerts for ${query.url}`, requestFn, {
+                    maxAttempts: 3,
+                    backoffMs: 2000
+                });
+
+                if (Array.isArray(items)) {
+                    alerts = alerts.concat(items);
                 }
             } catch (error) {
-                context.error(error); 
-            }
-
-            if (i % 10 === 0) {
-                await timeout(1000);
+                context.error(error);
             }
         }
     }
@@ -589,7 +727,11 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false) {
     return alerts;
 }
 
-async function getSophosAlert(context, token, tenant, alertID) {
+async function getSophosAlert(context, token, tenant, alertID, rateLimiter = null) {
+    if (rateLimiter) {
+        await rateLimiter();
+    }
+
     const url = `https://api-${tenant.dataRegion}.central.sophos.com/common/v1/alerts/${alertID}`;
 
     const fetchHeader = {
@@ -617,7 +759,11 @@ async function getSophosAlert(context, token, tenant, alertID) {
     }
 }
 
-async function closeSophosAlert(context, token, tenant, alertID) {
+async function closeSophosAlert(context, token, tenant, alertID, rateLimiter = null) {
+    if (rateLimiter) {
+        await rateLimiter();
+    }
+
     // Marks the alert as acknowledged
     const url = `https://api-${tenant.dataRegion}.central.sophos.com/common/v1/alerts/${alertID}/actions`;
 
@@ -866,3 +1012,8 @@ async function createAutotaskTicket(context, autotaskAPI, newTicket) {
     }
     return ticketID;
 }
+
+module.exports = {
+    createSophosRateLimiter,
+    runSophosRequestWithRetry
+};

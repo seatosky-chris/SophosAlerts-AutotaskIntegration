@@ -5,6 +5,8 @@ This script is used to watch for Sophos Alerts and handles ticket creation in Au
 ### Development Testing
 Note that for testing purposes this function uses the Azurite DB Emulator. You must have this extension installed in VS Code and before doing any testing, you must start Azurite.
 
+IMPORTANT! As of Aug 17, 2026, the Azurite extension in VS Code is not on the latest API and won't work properly with this script. Until that gets updated, manually run "npx azurite --skipApiVersionCheck" in a different terminal window before debugging this script. See: https://github.com/Azure/Azurite/issues/2623
+
 ### Organization Mapping
 For the script to work, you must map each organization in Sophos to the corresponding Company ID in Autotask. This is done in the OrgMapping.json document. Each line should map the full name of the organization in Sophos to the Autotask Company ID.
 

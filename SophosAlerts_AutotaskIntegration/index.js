@@ -138,7 +138,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
             }
 
             if (!alerts || alerts.length === 0) {
-                context.log("No Sophos alerts returned for this run. Skipping Autotask work.");
+                context.log("No Sophos alerts returned for this run. Skipping alert sync for this run.");
                 return;
             }
 
@@ -146,7 +146,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
             var upAlerts = alerts.filter(alert => alert && alert.severity == "low" && Object.keys(upDownEvents).includes(alert.type));
 
             if (!shouldProcessActionableAlerts(filteredAlerts, upAlerts)) {
-                context.log("No actionable Sophos alerts found. Skipping Autotask work for this run.");
+                context.log("No actionable Sophos alerts found. Skipping alert sync for this run.");
                 return;
             }
 
@@ -388,7 +388,6 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                                 }
 
                                 sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID, sophosRateLimiter);
-                                context.log("Alert: " + sophosAlert);
 
                                 if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
                                     // Alert in Sophos has been closed, self-heal the related ticket
@@ -419,8 +418,6 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 context.log("Sophos alert query did not complete successfully; lastRun.dat was not updated.");
             }
         }
-
-        context.log('JavaScript timer trigger function ran!', timeStamp);
     }
 });
 
@@ -483,7 +480,6 @@ function createSophosRateLimiter(context, requestsPerSecond = 10) {
         const waitMs = Math.max(0, minIntervalMs - elapsedMs);
 
         if (waitMs > 0) {
-            context && context.log && context.log(`Sophos rate limit: waiting ${waitMs}ms before next request`);
             await timeout(waitMs);
         }
 
@@ -744,8 +740,6 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false, ra
         });
     } catch (err) {
         context.error(err);
-        context.warn(tenants.items[0]);
-        context.warn(tenants.items);
         queryFailure = true;
     }
 
@@ -866,7 +860,7 @@ async function getSophosAlert(context, token, tenant, alertID, rateLimiter = nul
 
         return text ? JSON.parse(text) : null;
     } catch (error) {
-        console.error(`Error fetching Sophos alert ${alertID}:`, error);
+        context.error(`Error fetching Sophos alert ${alertID}:`, error);
         return null;
     }
 }
@@ -904,7 +898,7 @@ async function closeSophosAlert(context, token, tenant, alertID, rateLimiter = n
         const text = await response.text();
         return text ? JSON.parse(text) : null;
     } catch (error) {
-        console.error(`Error closing Sophos alert ${alertID}:`, error);
+        context.error(`Error closing Sophos alert ${alertID}:`, error);
         return null;
     }
 }

@@ -8,7 +8,7 @@ const upDownEvents = require('../UpDownEvents.json');
 var idRegex = /ID: ([0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12})(\n| )/m
 
 app.timer('SophosAlerts_AutotaskIntegration', {
-    schedule: "0 */10 * * * *",
+    schedule: "0 */20 * * * *",
     handler: async (myTimer, context) => {
         var timeStamp = new Date().toISOString();
         var lastRun = false

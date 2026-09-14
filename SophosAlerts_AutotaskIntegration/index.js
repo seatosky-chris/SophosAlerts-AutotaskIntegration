@@ -20,6 +20,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
         const blobServiceClient = getBlobServiceClient();
         const containerClient = blobServiceClient.getContainerClient("function-state");
         const blockBlobClient = containerClient.getBlockBlobClient("lastRun.dat");
+        const sophosMetadataCacheBlobClient = containerClient.getBlockBlobClient("sophosMetadata.json");
 
         context.log("Starting SophosAlerts_AutotaskIntegration function at: " + timeStamp);
 
@@ -84,14 +85,34 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 return;
             }
 
-            var sophosPartnerID = await getSophosPartnerID(context, sophosJWT, sophosRateLimiter);
-            if (!sophosPartnerID) {
-                context.warn("Sophos partner ID unavailable. Skipping alert sync for this run.");
-                return;
+            let sophosPartnerID;
+            let sophosTenants;
+            let usedSophosMetadataCache = false;
+            const sophosMetadataCache = await readSophosMetadataCache(context, sophosMetadataCacheBlobClient);
+
+            if (isFreshSophosMetadataCache(sophosMetadataCache)) {
+                sophosPartnerID = sophosMetadataCache.partnerID;
+                sophosTenants = sophosMetadataCache.tenants;
+                usedSophosMetadataCache = true;
+                context.log("Using cached Sophos partner ID and tenant list.");
+            } else {
+                sophosPartnerID = await getSophosPartnerID(context, sophosJWT, sophosRateLimiter);
+                if (!sophosPartnerID) {
+                    context.warn("Sophos partner ID unavailable. Skipping alert sync for this run.");
+                    return;
+                }
+
+                // Get list of tenants, we need to handle each on an individual basis
+                sophosTenants = await getSophosTenants(context, sophosJWT, sophosPartnerID, sophosRateLimiter);
+                if (sophosTenants && sophosTenants.items && sophosTenants.items.length > 0) {
+                    await writeSophosMetadataCache(context, sophosMetadataCacheBlobClient, {
+                        cachedAt: new Date().toISOString(),
+                        partnerID: sophosPartnerID,
+                        tenants: sophosTenants
+                    }, containerClient);
+                }
             }
 
-            // Get list of tenants, we need to handle each on an individual basis
-            var sophosTenants = await getSophosTenants(context, sophosJWT, sophosPartnerID, sophosRateLimiter);
             if (!sophosTenants || !sophosTenants.items || sophosTenants.items.length === 0) {
                 context.log("No Sophos tenants returned. Skipping alert sync for this run.");
                 return;
@@ -103,7 +124,9 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 return;
             }
 
-            await timeout(1000); // wait a second to prevent rate limiting
+            if (!usedSophosMetadataCache) {
+                await timeout(1000); // wait a second to prevent rate limiting after metadata requests
+            }
             let alerts;
             try {
                 alerts = await getSophosSiemAlerts(context, sophosJWT, sophosTenants, lastRunUnixTimestamp);
@@ -518,6 +541,41 @@ function shouldProcessActionableAlerts(alerts = [], upAlerts = []) {
 
 function getKeyByValue(object, value) {
     return Object.keys(object).find(key => object[key] == value);
+}
+
+function isFreshSophosMetadataCache(cache, now = Date.now()) {
+    if (!cache || !cache.cachedAt || !cache.partnerID || !cache.tenants || !Array.isArray(cache.tenants.items)) {
+        return false;
+    }
+
+    const cachedAt = Date.parse(cache.cachedAt);
+    return Number.isFinite(cachedAt) && cachedAt <= now && now - cachedAt < 24 * 60 * 60 * 1000;
+}
+
+async function readSophosMetadataCache(context, blobClient) {
+    try {
+        if (!(await blobClient.exists())) {
+            return null;
+        }
+
+        const downloadResponse = await blobClient.downloadToBuffer();
+        return JSON.parse(downloadResponse.toString("utf-8"));
+    } catch (error) {
+        context.warn("Could not read Sophos metadata cache; refreshing from Sophos: " + error);
+        return null;
+    }
+}
+
+async function writeSophosMetadataCache(context, blobClient, cache, containerClient) {
+    try {
+        await containerClient.createIfNotExists();
+        await blobClient.uploadData(Buffer.from(JSON.stringify(cache)), {
+            blobHTTPHeaders: { blobContentType: "application/json" }
+        });
+        context.log("Updated Sophos partner and tenant metadata cache.");
+    } catch (error) {
+        context.warn("Could not update Sophos metadata cache; continuing without cache: " + error);
+    }
 }
 
 async function getSophosToken(context, rateLimiter = null) {
@@ -1071,5 +1129,6 @@ module.exports = {
     createSophosRateLimiter,
     runSophosRequestWithRetry,
     shouldProcessActionableAlerts,
-    getSophosSiemAlerts
+    getSophosSiemAlerts,
+    isFreshSophosMetadataCache
 };

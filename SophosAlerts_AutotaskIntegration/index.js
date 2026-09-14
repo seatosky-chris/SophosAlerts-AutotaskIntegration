@@ -23,6 +23,8 @@ app.timer('SophosAlerts_AutotaskIntegration', {
         const sophosMetadataCacheBlobClient = containerClient.getBlockBlobClient("sophosMetadata.json");
         const closedAlertsCheckBlobClient = containerClient.getBlockBlobClient("lastClosedAlertsCheck.dat");
         const autotaskLocationsCacheBlobClient = containerClient.getBlockBlobClient("autotaskLocations.json");
+        const sophosDevicesCacheBlobClient = containerClient.getBlockBlobClient("sophosDevices.json");
+        const autotaskDevicesCacheBlobClient = containerClient.getBlockBlobClient("autotaskDevices.json");
 
         context.log("Starting SophosAlerts_AutotaskIntegration function at: " + timeStamp);
 
@@ -206,6 +208,10 @@ app.timer('SophosAlerts_AutotaskIntegration', {
             const autotaskLocationsCache = useAutotaskAPI
                 ? await readAutotaskLocationsCache(context, autotaskLocationsCacheBlobClient)
                 : { companies: {} };
+            const sophosDevicesCache = await readSophosDevicesCache(context, sophosDevicesCacheBlobClient);
+            const autotaskDevicesCache = useAutotaskAPI
+                ? await readAutotaskDevicesCache(context, autotaskDevicesCacheBlobClient)
+                : { devices: {} };
 
             var alertTenants = filteredAlerts.map(function(alert) {
                 return alert.customer_id;
@@ -220,7 +226,16 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                     return alert.data.endpoint_id;
                 });
 
-                var devices = await getSophosDevices(context, sophosJWT, sophosTenant, deviceIDs, sophosRateLimiter);
+                var devices = await getCachedSophosDevices(
+                    context,
+                    sophosJWT,
+                    sophosTenant,
+                    deviceIDs,
+                    sophosRateLimiter,
+                    sophosDevicesCache,
+                    sophosDevicesCacheBlobClient,
+                    containerClient
+                );
                 if (devices && devices.items) {
                     alertDevices[tenantID] = devices.items;
                 }
@@ -296,7 +311,15 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                     }
                     var deviceID = null;
                     if (useAutotaskAPI && alertDevice) {
-                        deviceID = await getAutotaskDevice(autotask, autotaskID, alertDevice);
+                        deviceID = await getCachedAutotaskDevice(
+                            context,
+                            autotask,
+                            autotaskID,
+                            alertDevice,
+                            autotaskDevicesCache,
+                            autotaskDevicesCacheBlobClient,
+                            containerClient
+                        );
                     }
                     var title = `Sophos Alert: "${alert.description}"`;
                     var includeAlertLocation = false;
@@ -597,6 +620,133 @@ function isFreshAutotaskLocationCacheEntry(entry, now = Date.now()) {
 
     const cachedAt = Date.parse(entry.cachedAt);
     return Number.isFinite(cachedAt) && cachedAt <= now && now - cachedAt < 7 * 24 * 60 * 60 * 1000;
+}
+
+function isFreshDeviceCacheEntry(entry, now = Date.now()) {
+    if (!entry || !entry.cachedAt) {
+        return false;
+    }
+
+    const cachedAt = Date.parse(entry.cachedAt);
+    return Number.isFinite(cachedAt) && cachedAt <= now && now - cachedAt < 24 * 60 * 60 * 1000;
+}
+
+async function readSophosDevicesCache(context, blobClient) {
+    try {
+        if (!(await blobClient.exists())) {
+            return { tenants: {} };
+        }
+
+        const downloadResponse = await blobClient.downloadToBuffer();
+        const cache = JSON.parse(downloadResponse.toString("utf-8"));
+        return cache && cache.tenants ? cache : { tenants: {} };
+    } catch (error) {
+        context.warn("Could not read Sophos device cache; refreshing devices as needed: " + error);
+        return { tenants: {} };
+    }
+}
+
+async function writeSophosDevicesCache(context, blobClient, cache, containerClient) {
+    try {
+        await containerClient.createIfNotExists();
+        await blobClient.uploadData(Buffer.from(JSON.stringify(cache)), {
+            blobHTTPHeaders: { blobContentType: "application/json" }
+        });
+        context.log("Updated Sophos device cache.");
+    } catch (error) {
+        context.warn("Could not update Sophos device cache; continuing without cache: " + error);
+    }
+}
+
+async function getCachedSophosDevices(context, token, tenant, ids, rateLimiter, cache, blobClient, containerClient) {
+    const deviceIDs = [...new Set((ids || []).filter(Boolean).map(String))];
+    const tenantKey = String(tenant.id);
+    const cachedEntry = cache.tenants[tenantKey];
+    const hasFreshCache = isFreshDeviceCacheEntry(cachedEntry);
+    const cachedDevices = hasFreshCache && cachedEntry.devices ? cachedEntry.devices : {};
+    const missingDeviceIDs = deviceIDs.filter(deviceID => !Object.prototype.hasOwnProperty.call(cachedDevices, deviceID));
+
+    if (missingDeviceIDs.length === 0) {
+        return {
+            items: deviceIDs.map(deviceID => cachedDevices[deviceID]).filter(Boolean)
+        };
+    }
+
+    const devices = await getSophosDevices(context, token, tenant, missingDeviceIDs, rateLimiter);
+    const updatedDevices = { ...cachedDevices };
+    if (devices && Array.isArray(devices.items)) {
+        for (const device of devices.items) {
+            if (device && device.id !== undefined && device.id !== null) {
+                updatedDevices[String(device.id)] = device;
+            }
+        }
+    }
+
+    cache.tenants[tenantKey] = {
+        cachedAt: new Date().toISOString(),
+        devices: updatedDevices
+    };
+    await writeSophosDevicesCache(context, blobClient, cache, containerClient);
+
+    return {
+        items: deviceIDs.map(deviceID => updatedDevices[deviceID]).filter(Boolean)
+    };
+}
+
+async function readAutotaskDevicesCache(context, blobClient) {
+    try {
+        if (!(await blobClient.exists())) {
+            return { devices: {} };
+        }
+
+        const downloadResponse = await blobClient.downloadToBuffer();
+        const cache = JSON.parse(downloadResponse.toString("utf-8"));
+        return cache && cache.devices ? cache : { devices: {} };
+    } catch (error) {
+        context.warn("Could not read Autotask device cache; refreshing devices as needed: " + error);
+        return { devices: {} };
+    }
+}
+
+async function writeAutotaskDevicesCache(context, blobClient, cache, containerClient) {
+    try {
+        await containerClient.createIfNotExists();
+        await blobClient.uploadData(Buffer.from(JSON.stringify(cache)), {
+            blobHTTPHeaders: { blobContentType: "application/json" }
+        });
+        context.log("Updated Autotask device cache.");
+    } catch (error) {
+        context.warn("Could not update Autotask device cache; continuing without cache: " + error);
+    }
+}
+
+function getAutotaskDeviceCacheKey(autotaskID, deviceDetails) {
+    const normalize = value => Array.isArray(value) ? [...value].sort() : (value || "");
+    return JSON.stringify({
+        companyID: autotaskID,
+        hostname: deviceDetails.hostname || "",
+        macAddresses: normalize(deviceDetails.macAddresses),
+        login: deviceDetails.associatedPerson && deviceDetails.associatedPerson.viaLogin || "",
+        ipv4Addresses: normalize(deviceDetails.ipv4Addresses)
+    });
+}
+
+async function getCachedAutotaskDevice(context, autotaskAPI, autotaskID, deviceDetails, cache, blobClient, containerClient) {
+    const deviceKey = getAutotaskDeviceCacheKey(autotaskID, deviceDetails);
+    const cachedEntry = cache.devices[deviceKey];
+
+    if (isFreshDeviceCacheEntry(cachedEntry) && Object.prototype.hasOwnProperty.call(cachedEntry, "deviceID")) {
+        context.log("Using cached Autotask device for company " + autotaskID + ".");
+        return cachedEntry.deviceID;
+    }
+
+    const deviceID = await getAutotaskDevice(autotaskAPI, autotaskID, deviceDetails);
+    cache.devices[deviceKey] = {
+        cachedAt: new Date().toISOString(),
+        deviceID: deviceID || null
+    };
+    await writeAutotaskDevicesCache(context, blobClient, cache, containerClient);
+    return deviceID;
 }
 
 async function readAutotaskLocationsCache(context, blobClient) {
@@ -1118,7 +1268,7 @@ async function getAutotaskDevice(autotaskAPI, autotaskID, deviceDetails) {
         }
     }
 
-    if (device && device.length > 0) {
+    if (device && device.items && device.items.length > 0) {
         deviceID = device.items[0].id;
     }
     return deviceID;
@@ -1236,5 +1386,7 @@ module.exports = {
     getSophosSiemAlerts,
     isFreshSophosMetadataCache,
     shouldRunClosedAlertsCheck,
-    isFreshAutotaskLocationCacheEntry
+    isFreshAutotaskLocationCacheEntry,
+    isFreshDeviceCacheEntry,
+    getAutotaskDeviceCacheKey
 };

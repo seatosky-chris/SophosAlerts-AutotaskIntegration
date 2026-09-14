@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry } = require('../SophosAlerts_AutotaskIntegration/index.js');
+const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry, isFreshDeviceCacheEntry, getAutotaskDeviceCacheKey } = require('../SophosAlerts_AutotaskIntegration/index.js');
 
 test('Sophos rate limiter keeps requests at or below 10/sec', async () => {
   const limiter = createSophosRateLimiter({ log: () => {} }, 10);
@@ -73,6 +73,26 @@ test('Autotask location cache remains valid for seven days', () => {
   assert.equal(isFreshAutotaskLocationCacheEntry({ ...baseEntry, cachedAt: '2026-09-07T12:00:00.000Z' }, now), false);
   assert.equal(isFreshAutotaskLocationCacheEntry({ cachedAt: baseEntry.cachedAt }, now), false);
   assert.equal(isFreshAutotaskLocationCacheEntry({ ...baseEntry, cachedAt: '2026-09-14T13:00:00.000Z' }, now), false);
+});
+
+test('Device caches expire after 24 hours and Autotask keys include device identity', () => {
+  const now = Date.parse('2026-09-14T12:00:00.000Z');
+  const entry = { cachedAt: '2026-09-13T12:00:01.000Z', deviceID: 123 };
+  const deviceDetails = {
+    hostname: 'workstation-1',
+    macAddresses: ['BB', 'AA'],
+    associatedPerson: { viaLogin: 'user@example.com' },
+    ipv4Addresses: ['10.0.0.2']
+  };
+
+  assert.equal(isFreshDeviceCacheEntry(entry, now), true);
+  assert.equal(isFreshDeviceCacheEntry({ ...entry, cachedAt: '2026-09-13T12:00:00.000Z' }, now), false);
+  assert.equal(isFreshDeviceCacheEntry({ cachedAt: entry.cachedAt }, now), true);
+  assert.notEqual(getAutotaskDeviceCacheKey(42, deviceDetails), getAutotaskDeviceCacheKey(43, deviceDetails));
+  assert.equal(
+    getAutotaskDeviceCacheKey(42, deviceDetails),
+    getAutotaskDeviceCacheKey(42, { ...deviceDetails, macAddresses: ['AA', 'BB'] })
+  );
 });
 
 test('Sophos alert query failures should be surfaced instead of silently writing the checkpoint', async () => {

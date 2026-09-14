@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSophosRateLimiter, runSophosRequestWithRetry } = require('../SophosAlerts_AutotaskIntegration/index.js');
+const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts } = require('../SophosAlerts_AutotaskIntegration/index.js');
 
 test('Sophos rate limiter keeps requests at or below 10/sec', async () => {
   const limiter = createSophosRateLimiter({ log: () => {} }, 10);
@@ -31,4 +31,38 @@ test('Sophos 429 retry loop is capped to a finite number of attempts', async () 
 
   assert.equal(attempts, 3, `Expected 3 total attempts, got ${attempts}`);
   assert.equal(result, null, 'Expected null result after exhausting retries');
+});
+
+test('Empty or non-actionable alert sets should not continue processing', () => {
+  assert.equal(shouldProcessActionableAlerts([], []), false, 'No alerts should be skipped');
+  assert.equal(shouldProcessActionableAlerts([], [{ severity: 'low', type: 'Event::Endpoint::ServiceRestored' }]), true, 'Matching up/down events should continue');
+  assert.equal(shouldProcessActionableAlerts([{ severity: 'medium' }], []), true, 'Medium alerts should continue');
+  assert.equal(shouldProcessActionableAlerts([], [{ severity: 'low', type: 'not-a-real-event' }]), false, 'Unknown low-severity events should be skipped');
+});
+
+test('Sophos alert query failures should be surfaced instead of silently writing the checkpoint', async () => {
+  const originalFetch = global.fetch;
+  const originalAxiosGet = require('axios').get;
+
+  global.fetch = async () => {
+    throw new Error('network failure');
+  };
+  require('axios').get = async () => {
+    throw new Error('network failure');
+  };
+
+  try {
+    await assert.rejects(
+      () => getSophosSiemAlerts(
+        { log: () => {}, warn: () => {}, error: () => {} },
+        'token',
+        { items: [{ id: 'tenant-1', status: 'active', dataRegion: 'example' }] },
+        123
+      ),
+      /Sophos alerts query failed/
+    );
+  } finally {
+    global.fetch = originalFetch;
+    require('axios').get = originalAxiosGet;
+  }
 });

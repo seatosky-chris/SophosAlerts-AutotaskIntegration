@@ -21,6 +21,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
         const containerClient = blobServiceClient.getContainerClient("function-state");
         const blockBlobClient = containerClient.getBlockBlobClient("lastRun.dat");
         const sophosMetadataCacheBlobClient = containerClient.getBlockBlobClient("sophosMetadata.json");
+        const closedAlertsCheckBlobClient = containerClient.getBlockBlobClient("lastClosedAlertsCheck.dat");
 
         context.log("Starting SophosAlerts_AutotaskIntegration function at: " + timeStamp);
 
@@ -31,6 +32,16 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 context.log("Updated lastRun.dat in Blob Storage to: " + timeStamp);
             } catch (error) {
                 context.error("Could not update lastRun.dat in Blob Storage: " + error);
+            }
+        };
+
+        const updateClosedAlertsCheck = async () => {
+            try {
+                await containerClient.createIfNotExists();
+                await closedAlertsCheckBlobClient.uploadData(Buffer.from(timeStamp));
+                context.log("Updated lastClosedAlertsCheck.dat in Blob Storage to: " + timeStamp);
+            } catch (error) {
+                context.error("Could not update lastClosedAlertsCheck.dat in Blob Storage: " + error);
             }
         };
 
@@ -138,7 +149,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
             }
 
             if (!alerts || alerts.length === 0) {
-                context.log("No Sophos alerts returned for this run. Skipping alert sync for this run.");
+            context.log("No Sophos alerts returned for this run. Skipping alert sync for this run.");
                 return;
             }
 
@@ -371,44 +382,55 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                     }
                 }
 
-                // Close tickets where the original alert no longer exists (closed but we don't get an up alert)
-                var allSophosAlertTickets = await searchAutotaskTickets(context, autotask, false, "Sophos Alert: ");
-                if (allSophosAlertTickets && allSophosAlertTickets.length > 0) {
-                    for (i = 0; i < allSophosAlertTickets.length; i++) {
-                        var alertTicket = allSophosAlertTickets[i];
-                        var alertIDMatches = idRegex.exec(alertTicket.description);
-                        if (alertIDMatches) {
-                            var alertID = alertIDMatches[1];
-                            if (alertID) {
-                                const sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID);
-                                const sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
+                const lastClosedAlertsCheck = await readTimestampBlob(context, closedAlertsCheckBlobClient, "lastClosedAlertsCheck.dat");
+                if (shouldRunClosedAlertsCheck(lastClosedAlertsCheck)) {
+                    try {
+                        // Close tickets where the original alert no longer exists (closed but we don't get an up alert)
+                        var allSophosAlertTickets = await searchAutotaskTickets(context, autotask, false, "Sophos Alert: ");
+                        if (allSophosAlertTickets && allSophosAlertTickets.length > 0) {
+                            for (i = 0; i < allSophosAlertTickets.length; i++) {
+                                var alertTicket = allSophosAlertTickets[i];
+                                var alertIDMatches = idRegex.exec(alertTicket.description);
+                                if (alertIDMatches) {
+                                    var alertID = alertIDMatches[1];
+                                    if (alertID) {
+                                        const sophosCompanyName = getKeyByValue(orgMapping, alertTicket.companyID);
+                                        const sophosTenant = (sophosTenants.items.filter(tenant => tenant.name == sophosCompanyName))[0];
 
-                                if (!sophosTenant || sophosTenant == undefined) {
-                                    continue;
-                                }
+                                        if (!sophosTenant || sophosTenant == undefined) {
+                                            continue;
+                                        }
 
-                                sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID, sophosRateLimiter);
+                                        sophosAlert = await getSophosAlert(context, sophosJWT, sophosTenant, alertID, sophosRateLimiter);
 
-                                if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
-                                    // Alert in Sophos has been closed, self-heal the related ticket
-                                    let closingNote = {
-                                        "TicketID": alertTicket.id,
-                                        "Title": "Self-Healing Update",
-                                        "Description": "[Self-Healing] The Sophos alert is no longer open. Self-healing this ticket.",
-                                        "NoteType": 1,
-                                        "Publish": 1
-                                    };
-                                    await autotask.TicketNotes.create(alertTicket.id, closingNote);
+                                        if (!sophosAlert || (sophosAlert.error && sophosAlert.error == "resourceNotFound")) {
+                                            // Alert in Sophos has been closed, self-heal the related ticket
+                                            let closingNote = {
+                                                "TicketID": alertTicket.id,
+                                                "Title": "Self-Healing Update",
+                                                "Description": "[Self-Healing] The Sophos alert is no longer open. Self-healing this ticket.",
+                                                "NoteType": 1,
+                                                "Publish": 1
+                                            };
+                                            await autotask.TicketNotes.create(alertTicket.id, closingNote);
 
-                                    let closingTicket = {
-                                        "id": alertTicket.id,
-                                        "Status": (alertTicket.assignedResourceID ? 13 : 5)
-                                    };
-                                    await autotask.Tickets.update(closingTicket);
+                                            let closingTicket = {
+                                                "id": alertTicket.id,
+                                                "Status": (alertTicket.assignedResourceID ? 13 : 5)
+                                            };
+                                            await autotask.Tickets.update(closingTicket);
+                                        }
+                                    }
                                 }
                             }
                         }
+                        await updateClosedAlertsCheck();
+                    } catch (error) {
+                        context.error("Closed Sophos alert sweep failed; it will be retried on the next run.");
+                        context.error(error);
                     }
+                } else {
+                    context.log("Skipping closed Sophos alert sweep; it ran less than two hours ago.");
                 }
             }
         } finally {
@@ -546,6 +568,28 @@ function isFreshSophosMetadataCache(cache, now = Date.now()) {
 
     const cachedAt = Date.parse(cache.cachedAt);
     return Number.isFinite(cachedAt) && cachedAt <= now && now - cachedAt < 24 * 60 * 60 * 1000;
+}
+
+function shouldRunClosedAlertsCheck(lastCheck, now = Date.now()) {
+    if (!(lastCheck instanceof Date) || isNaN(lastCheck.getTime())) {
+        return true;
+    }
+
+    return lastCheck.getTime() <= now && now - lastCheck.getTime() >= 2 * 60 * 60 * 1000;
+}
+
+async function readTimestampBlob(context, blobClient, blobName) {
+    try {
+        if (!(await blobClient.exists())) {
+            return null;
+        }
+
+        const downloadResponse = await blobClient.downloadToBuffer();
+        return new Date(downloadResponse.toString("utf-8"));
+    } catch (error) {
+        context.warn(`Could not read ${blobName}; running the check: ${error}`);
+        return null;
+    }
 }
 
 async function readSophosMetadataCache(context, blobClient) {
@@ -1124,5 +1168,6 @@ module.exports = {
     runSophosRequestWithRetry,
     shouldProcessActionableAlerts,
     getSophosSiemAlerts,
-    isFreshSophosMetadataCache
+    isFreshSophosMetadataCache,
+    shouldRunClosedAlertsCheck
 };

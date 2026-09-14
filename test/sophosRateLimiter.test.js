@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache } = require('../SophosAlerts_AutotaskIntegration/index.js');
+const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck } = require('../SophosAlerts_AutotaskIntegration/index.js');
 
 test('Sophos rate limiter keeps requests at or below 10/sec', async () => {
   const limiter = createSophosRateLimiter({ log: () => {} }, 10);
@@ -51,6 +51,15 @@ test('Sophos metadata cache is fresh for less than 24 hours only', () => {
   assert.equal(isFreshSophosMetadataCache(baseCache, now), true);
   assert.equal(isFreshSophosMetadataCache({ ...baseCache, cachedAt: '2026-09-13T12:00:00.000Z' }, now), false);
   assert.equal(isFreshSophosMetadataCache({ ...baseCache, tenants: null }, now), false);
+});
+
+test('Closed-alert sweep runs immediately and then every two hours', () => {
+  const now = Date.parse('2026-09-14T12:00:00.000Z');
+
+  assert.equal(shouldRunClosedAlertsCheck(null, now), true);
+  assert.equal(shouldRunClosedAlertsCheck(new Date('2026-09-14T10:00:00.000Z'), now), true);
+  assert.equal(shouldRunClosedAlertsCheck(new Date('2026-09-14T10:00:01.000Z'), now), false);
+  assert.equal(shouldRunClosedAlertsCheck(new Date('2026-09-14T12:01:00.000Z'), now), false);
 });
 
 test('Sophos alert query failures should be surfaced instead of silently writing the checkpoint', async () => {

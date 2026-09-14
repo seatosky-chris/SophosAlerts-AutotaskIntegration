@@ -9,7 +9,7 @@ This repo is an Azure Functions timer app that polls Sophos for alerts and creat
 - Use Node.js for local development; the function is a timer trigger and not a typical web app.
 - Local testing requires Azurite. Before debugging, start it with:
   - `npx azurite --skipApiVersionCheck`
-- Persist runtime state in Azure Blob Storage, not in local files. The current checkpoint is `function-state/lastRun.dat`, and the daily Sophos partner/tenant metadata cache is `function-state/sophosMetadata.json`; both are read and written through `BlobServiceClient` in [SophosAlerts_AutotaskIntegration/index.js](SophosAlerts_AutotaskIntegration/index.js). Local development uses Azurite through `AzureWebJobsStorage` or `UseDevelopmentStorage=true`; do not replace this with filesystem-based state or add local runtime-state files.
+- Persist runtime state in Azure Blob Storage, not in local files. The current checkpoint is `function-state/lastRun.dat`, the daily Sophos partner/tenant metadata cache is `function-state/sophosMetadata.json`, and the two-hour closed-alert sweep checkpoint is `function-state/lastClosedAlertsCheck.dat`; all are read and written through `BlobServiceClient` in [SophosAlerts_AutotaskIntegration/index.js](SophosAlerts_AutotaskIntegration/index.js). Local development uses Azurite through `AzureWebJobsStorage` or `UseDevelopmentStorage=true`; do not replace this with filesystem-based state or add local runtime-state files.
 - The project uses environment settings from `local.settings.json` (copy from `local.settings.json.template`), and organization mapping from `OrgMapping.json` (copy from `OrgMapping.json.template`).
 - This project intentionally filters out `low` severity Sophos alerts and uses a self-healing flow for `up` events.
 

@@ -22,6 +22,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
         const blockBlobClient = containerClient.getBlockBlobClient("lastRun.dat");
         const sophosMetadataCacheBlobClient = containerClient.getBlockBlobClient("sophosMetadata.json");
         const closedAlertsCheckBlobClient = containerClient.getBlockBlobClient("lastClosedAlertsCheck.dat");
+        const autotaskLocationsCacheBlobClient = containerClient.getBlockBlobClient("autotaskLocations.json");
 
         context.log("Starting SophosAlerts_AutotaskIntegration function at: " + timeStamp);
 
@@ -202,6 +203,10 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 useAutotaskAPI = false;
             }
 
+            const autotaskLocationsCache = useAutotaskAPI
+                ? await readAutotaskLocationsCache(context, autotaskLocationsCacheBlobClient)
+                : { companies: {} };
+
             var alertTenants = filteredAlerts.map(function(alert) {
                 return alert.customer_id;
             });
@@ -273,7 +278,14 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                     // Get primary location
                     var location = null;
                     if (useAutotaskAPI) {
-                        location = await getAutotaskLocation(autotask, autotaskID);
+                        location = await getCachedAutotaskLocation(
+                            context,
+                            autotask,
+                            autotaskID,
+                            autotaskLocationsCache,
+                            autotaskLocationsCacheBlobClient,
+                            containerClient
+                        );
                     }
 
                     // Get related device if applicable
@@ -576,6 +588,60 @@ function shouldRunClosedAlertsCheck(lastCheck, now = Date.now()) {
     }
 
     return lastCheck.getTime() <= now && now - lastCheck.getTime() >= 2 * 60 * 60 * 1000;
+}
+
+function isFreshAutotaskLocationCacheEntry(entry, now = Date.now()) {
+    if (!entry || !Object.prototype.hasOwnProperty.call(entry, "location") || !entry.cachedAt) {
+        return false;
+    }
+
+    const cachedAt = Date.parse(entry.cachedAt);
+    return Number.isFinite(cachedAt) && cachedAt <= now && now - cachedAt < 7 * 24 * 60 * 60 * 1000;
+}
+
+async function readAutotaskLocationsCache(context, blobClient) {
+    try {
+        if (!(await blobClient.exists())) {
+            return { companies: {} };
+        }
+
+        const downloadResponse = await blobClient.downloadToBuffer();
+        const cache = JSON.parse(downloadResponse.toString("utf-8"));
+        return cache && cache.companies ? cache : { companies: {} };
+    } catch (error) {
+        context.warn("Could not read Autotask location cache; refreshing locations as needed: " + error);
+        return { companies: {} };
+    }
+}
+
+async function writeAutotaskLocationsCache(context, blobClient, cache, containerClient) {
+    try {
+        await containerClient.createIfNotExists();
+        await blobClient.uploadData(Buffer.from(JSON.stringify(cache)), {
+            blobHTTPHeaders: { blobContentType: "application/json" }
+        });
+        context.log("Updated Autotask location cache.");
+    } catch (error) {
+        context.warn("Could not update Autotask location cache; continuing without cache: " + error);
+    }
+}
+
+async function getCachedAutotaskLocation(context, autotaskAPI, autotaskID, cache, blobClient, containerClient) {
+    const companyKey = String(autotaskID);
+    const cachedEntry = cache.companies[companyKey];
+
+    if (isFreshAutotaskLocationCacheEntry(cachedEntry)) {
+        context.log("Using cached Autotask location for company " + companyKey + ".");
+        return cachedEntry.location;
+    }
+
+    const location = await getAutotaskLocation(autotaskAPI, autotaskID);
+    cache.companies[companyKey] = {
+        cachedAt: new Date().toISOString(),
+        location: location || null
+    };
+    await writeAutotaskLocationsCache(context, blobClient, cache, containerClient);
+    return location;
 }
 
 async function readTimestampBlob(context, blobClient, blobName) {
@@ -1169,5 +1235,6 @@ module.exports = {
     shouldProcessActionableAlerts,
     getSophosSiemAlerts,
     isFreshSophosMetadataCache,
-    shouldRunClosedAlertsCheck
+    shouldRunClosedAlertsCheck,
+    isFreshAutotaskLocationCacheEntry
 };

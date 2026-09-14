@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck } = require('../SophosAlerts_AutotaskIntegration/index.js');
+const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry } = require('../SophosAlerts_AutotaskIntegration/index.js');
 
 test('Sophos rate limiter keeps requests at or below 10/sec', async () => {
   const limiter = createSophosRateLimiter({ log: () => {} }, 10);
@@ -60,6 +60,19 @@ test('Closed-alert sweep runs immediately and then every two hours', () => {
   assert.equal(shouldRunClosedAlertsCheck(new Date('2026-09-14T10:00:00.000Z'), now), true);
   assert.equal(shouldRunClosedAlertsCheck(new Date('2026-09-14T10:00:01.000Z'), now), false);
   assert.equal(shouldRunClosedAlertsCheck(new Date('2026-09-14T12:01:00.000Z'), now), false);
+});
+
+test('Autotask location cache remains valid for seven days', () => {
+  const now = Date.parse('2026-09-14T12:00:00.000Z');
+  const baseEntry = {
+    cachedAt: '2026-09-07T12:00:01.000Z',
+    location: null
+  };
+
+  assert.equal(isFreshAutotaskLocationCacheEntry(baseEntry, now), true);
+  assert.equal(isFreshAutotaskLocationCacheEntry({ ...baseEntry, cachedAt: '2026-09-07T12:00:00.000Z' }, now), false);
+  assert.equal(isFreshAutotaskLocationCacheEntry({ cachedAt: baseEntry.cachedAt }, now), false);
+  assert.equal(isFreshAutotaskLocationCacheEntry({ ...baseEntry, cachedAt: '2026-09-14T13:00:00.000Z' }, now), false);
 });
 
 test('Sophos alert query failures should be surfaced instead of silently writing the checkpoint', async () => {

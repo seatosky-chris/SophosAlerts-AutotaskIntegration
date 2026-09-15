@@ -549,6 +549,44 @@ function createSophosRateLimiter(context, requestsPerSecond = 10) {
     };
 }
 
+function createAdaptiveSophosRetryState() {
+    return {
+        recentSuccesses: 0,
+        recent429s: 0,
+        consecutive429s: 0,
+        lastStatus: null
+    };
+}
+
+function getAdaptiveSophosRetryMaxAttempts(state = {}, options = {}) {
+    const baseMaxAttempts = Math.max(1, Number(options.baseMaxAttempts) || 3);
+    const maxSafeAttempts = Math.max(baseMaxAttempts, Number(options.maxSafeAttempts) || 8);
+    const recentSuccesses = Math.max(0, Number(state.recentSuccesses) || 0);
+    const consecutive429s = Math.max(0, Number(state.consecutive429s) || 0);
+    const recent429s = Math.max(0, Number(state.recent429s) || 0);
+
+    if (consecutive429s >= 3 || recent429s >= 3) {
+        return baseMaxAttempts;
+    }
+
+    if (recentSuccesses >= 2) {
+        const opportunity = Math.min(maxSafeAttempts - baseMaxAttempts, Math.floor(recentSuccesses / 2));
+        return Math.min(maxSafeAttempts, baseMaxAttempts + opportunity);
+    }
+
+    return baseMaxAttempts;
+}
+
+function shouldStopSophosTenantLoop(state = {}, options = {}) {
+    const consecutive429s = Math.max(0, Number(state.consecutive429s) || 0);
+    const recent429s = Math.max(0, Number(state.recent429s) || 0);
+    const recentSuccesses = Math.max(0, Number(state.recentSuccesses) || 0);
+    const minConsecutive429s = Math.max(2, Number(options.minConsecutive429s) || 3);
+    const minRecent429s = Math.max(2, Number(options.minRecent429s) || 3);
+
+    return (consecutive429s >= minConsecutive429s) || (recent429s >= minRecent429s && recentSuccesses === 0);
+}
+
 async function sleepWithContext(context, ms, reason) {
     if (reason) {
         context && context.log && context.log(`Sophos ${reason}: waiting ${ms}ms before retrying`);
@@ -557,20 +595,39 @@ async function sleepWithContext(context, ms, reason) {
 }
 
 async function runSophosRequestWithRetry(context, label, requestFn, options = {}) {
-    const maxAttempts = Math.max(1, Number(options.maxAttempts) || 3);
+    const adaptiveState = options.state || createAdaptiveSophosRetryState();
+    const baseMaxAttempts = Math.max(1, Number(options.maxAttempts) || 3);
+    const maxAttempts = getAdaptiveSophosRetryMaxAttempts(adaptiveState, {
+        baseMaxAttempts,
+        maxSafeAttempts: Math.max(baseMaxAttempts, Number(options.maxSafeAttempts) || 8)
+    });
     const backoffMs = Math.max(0, Number(options.backoffMs) || 2000);
 
     let lastError = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            return await requestFn(attempt);
+            const result = await requestFn(attempt);
+            adaptiveState.recentSuccesses = (Number(adaptiveState.recentSuccesses) || 0) + 1;
+            adaptiveState.recent429s = Math.max(0, (Number(adaptiveState.recent429s) || 0) - 1);
+            adaptiveState.consecutive429s = 0;
+            adaptiveState.lastStatus = 'success';
+            return result;
         } catch (error) {
             lastError = error;
             const status = error && error.response ? error.response.status : null;
 
             if (status !== 429) {
+                adaptiveState.recentSuccesses = 0;
+                adaptiveState.recent429s = 0;
+                adaptiveState.consecutive429s = 0;
+                adaptiveState.lastStatus = status || 'error';
                 throw error;
             }
+
+            adaptiveState.recent429s = (Number(adaptiveState.recent429s) || 0) + 1;
+            adaptiveState.consecutive429s = (Number(adaptiveState.consecutive429s) || 0) + 1;
+            adaptiveState.recentSuccesses = 0;
+            adaptiveState.lastStatus = 429;
 
             if (attempt < maxAttempts) {
                 context && context.warn && context.warn(`Sophos ${label} hit 429 on attempt ${attempt}/${maxAttempts}. Retrying in ${backoffMs}ms.`);
@@ -1014,6 +1071,7 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false, ra
     let retryUrls = [];
     let queryFailure = false;
     const sophosRateLimiter = rateLimiter || createSophosRateLimiter(context, 7);
+    const adaptiveRetryState = createAdaptiveSophosRetryState();
 
     try {
         tenants.items.filter(t => t !== undefined).filter(t => t.status && t.status == 'active').forEach(function(tenant) {
@@ -1045,6 +1103,12 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false, ra
 
     let alerts = [];
     for (const query of queryUrls) {
+        if (shouldStopSophosTenantLoop(adaptiveRetryState)) {
+            context.warn('Sophos API is continuing to throttle; stopping tenant alert retrieval for this cycle.');
+            queryFailure = true;
+            break;
+        }
+
         await sophosRateLimiter();
 
         try {
@@ -1058,7 +1122,9 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false, ra
 
             const items = await runSophosRequestWithRetry(context, `SIEM alerts for ${query.url}`, requestFn, {
                 maxAttempts: 3,
-                backoffMs: 2000
+                maxSafeAttempts: 8,
+                backoffMs: 2000,
+                state: adaptiveRetryState
             });
 
             if (Array.isArray(items)) {
@@ -1089,6 +1155,12 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false, ra
 
     if (retryUrls && retryUrls.length > 0) {
         for (const query of retryUrls) {
+            if (shouldStopSophosTenantLoop(adaptiveRetryState)) {
+                context.warn('Sophos API is still throttling during retry requests; stopping retry tenant loop.');
+                queryFailure = true;
+                break;
+            }
+
             await sophosRateLimiter();
 
             try {
@@ -1111,7 +1183,9 @@ async function getSophosSiemAlerts(context, token, tenants, fromDate = false, ra
 
                 const items = await runSophosRequestWithRetry(context, `retry SIEM alerts for ${query.url}`, requestFn, {
                     maxAttempts: 3,
-                    backoffMs: 2000
+                    maxSafeAttempts: 8,
+                    backoffMs: 2000,
+                    state: adaptiveRetryState
                 });
 
                 if (Array.isArray(items)) {
@@ -1421,6 +1495,9 @@ async function createAutotaskTicket(context, autotaskAPI, newTicket) {
 
 module.exports = {
     createSophosRateLimiter,
+    createAdaptiveSophosRetryState,
+    getAdaptiveSophosRetryMaxAttempts,
+    shouldStopSophosTenantLoop,
     runSophosRequestWithRetry,
     shouldProcessActionableAlerts,
     getSophosSiemAlerts,

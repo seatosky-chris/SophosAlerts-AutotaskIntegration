@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry, isFreshDeviceCacheEntry, getAutotaskDeviceCacheKey, deduplicateAlerts, getAutotaskTicketSearchKey } = require('../SophosAlerts_AutotaskIntegration/index.js');
+const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry, isFreshDeviceCacheEntry, getAutotaskDeviceCacheKey, deduplicateAlerts, getAutotaskTicketSearchKey, getAdaptiveSophosRetryMaxAttempts, shouldStopSophosTenantLoop } = require('../SophosAlerts_AutotaskIntegration/index.js');
 
 test('Sophos rate limiter keeps requests at or below 10/sec', async () => {
   const limiter = createSophosRateLimiter({ log: () => {} }, 10);
@@ -31,6 +31,18 @@ test('Sophos 429 retry loop is capped to a finite number of attempts', async () 
 
   assert.equal(attempts, 3, `Expected 3 total attempts, got ${attempts}`);
   assert.equal(result, null, 'Expected null result after exhausting retries');
+});
+
+test('Adaptive retry ceiling expands after a healthy recent success streak', () => {
+  const state = { recentSuccesses: 4, consecutive429s: 0, recent429s: 0 };
+
+  assert.equal(getAdaptiveSophosRetryMaxAttempts(state, { baseMaxAttempts: 3, maxSafeAttempts: 8 }), 5);
+});
+
+test('Adaptive retry stops tenant processing when throttling remains sustained', () => {
+  const state = { recentSuccesses: 0, consecutive429s: 4, recent429s: 4 };
+
+  assert.equal(shouldStopSophosTenantLoop(state), true);
 });
 
 test('Empty or non-actionable alert sets should not continue processing', () => {

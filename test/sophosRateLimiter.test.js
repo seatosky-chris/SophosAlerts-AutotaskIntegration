@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry, isFreshDeviceCacheEntry, getAutotaskDeviceCacheKey } = require('../SophosAlerts_AutotaskIntegration/index.js');
+const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry, isFreshDeviceCacheEntry, getAutotaskDeviceCacheKey, deduplicateAlerts, getAutotaskTicketSearchKey } = require('../SophosAlerts_AutotaskIntegration/index.js');
 
 test('Sophos rate limiter keeps requests at or below 10/sec', async () => {
   const limiter = createSophosRateLimiter({ log: () => {} }, 10);
@@ -93,6 +93,25 @@ test('Device caches expire after 24 hours and Autotask keys include device ident
     getAutotaskDeviceCacheKey(42, deviceDetails),
     getAutotaskDeviceCacheKey(42, { ...deviceDetails, macAddresses: ['AA', 'BB'] })
   );
+});
+
+test('Alert deduplication keeps distinct alerts and removes repeated IDs', () => {
+  const alerts = [
+    { id: 'alert-1', severity: 'high' },
+    { id: 'alert-1', severity: 'high' },
+    { id: 'alert-2', severity: 'medium' },
+    { severity: 'high' },
+    { severity: 'high' }
+  ];
+
+  assert.deepEqual(deduplicateAlerts(alerts).map(alert => alert.id), ['alert-1', 'alert-2', undefined, undefined]);
+});
+
+test('Autotask ticket search keys distinguish search scope', () => {
+  const baseKey = getAutotaskTicketSearchKey(42, 'Sophos Alert: ', 'device-1', 'event-1');
+  assert.equal(baseKey, getAutotaskTicketSearchKey(42, 'Sophos Alert: ', 'device-1', 'event-1'));
+  assert.notEqual(baseKey, getAutotaskTicketSearchKey(42, 'Sophos Alert: ', 'device-2', 'event-1'));
+  assert.notEqual(baseKey, getAutotaskTicketSearchKey(43, 'Sophos Alert: ', 'device-1', 'event-1'));
 });
 
 test('Sophos alert query failures should be surfaced instead of silently writing the checkpoint', async () => {

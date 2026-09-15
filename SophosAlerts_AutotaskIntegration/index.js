@@ -156,8 +156,8 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 return;
             }
 
-            var filteredAlerts = alerts.filter(alert => alert && alert.severity && alert.severity != "low");
-            var upAlerts = alerts.filter(alert => alert && alert.severity == "low" && Object.keys(upDownEvents).includes(alert.type));
+            var filteredAlerts = deduplicateAlerts(alerts.filter(alert => alert && alert.severity && alert.severity != "low"));
+            var upAlerts = deduplicateAlerts(alerts.filter(alert => alert && alert.severity == "low" && Object.keys(upDownEvents).includes(alert.type)));
 
             if (!shouldProcessActionableAlerts(filteredAlerts, upAlerts)) {
                 context.log("No actionable Sophos alerts found. Skipping alert sync for this run.");
@@ -212,6 +212,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
             const autotaskDevicesCache = useAutotaskAPI
                 ? await readAutotaskDevicesCache(context, autotaskDevicesCacheBlobClient)
                 : { devices: {} };
+            const ticketSearchCache = new Map();
 
             var alertTenants = filteredAlerts.map(function(alert) {
                 return alert.customer_id;
@@ -260,7 +261,15 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 // See if there are any existing tickets of this type and for this device
                 let tickets = null;
                 if (useAutotaskAPI) {
-                    tickets = await searchAutotaskTickets(context, autotask, autotaskID, "Sophos Alert: ", alert.location, alert.type);
+                    tickets = await getCachedAutotaskTickets(
+                        context,
+                        autotask,
+                        ticketSearchCache,
+                        autotaskID,
+                        "Sophos Alert: ",
+                        alert.location,
+                        alert.type
+                    );
                 }
 
                 if (tickets && tickets.length > 0) {
@@ -360,6 +369,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                     }
 
                     await createAutotaskTicket(context, autotask, newTicket);
+                    ticketSearchCache.delete(getAutotaskTicketSearchKey(autotaskID, "Sophos Alert: ", alert.location, alert.type));
                 }
             }
 
@@ -376,7 +386,15 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                         autotaskID = orgMapping[sophosCompany];
                     }
 
-                    let tickets = await searchAutotaskTickets(context, autotask, autotaskID, "Sophos Alert: ", alert.location, upDownEvents[alert.type]);
+                    let tickets = await getCachedAutotaskTickets(
+                        context,
+                        autotask,
+                        ticketSearchCache,
+                        autotaskID,
+                        "Sophos Alert: ",
+                        alert.location,
+                        upDownEvents[alert.type]
+                    );
                     if (tickets && tickets.length > 0) {
                         context.log("Existing Tickets: " + tickets.length);
                         // get latest ticket
@@ -590,6 +608,41 @@ function shouldProcessActionableAlerts(alerts = [], upAlerts = []) {
     const hasUpAlerts = upAlerts.some(alert => alert && alert.type && Object.keys(upDownEvents).includes(alert.type));
 
     return hasNonLowAlerts || hasUpAlerts;
+}
+
+function deduplicateAlerts(alerts = []) {
+    const seenAlertIDs = new Set();
+
+    return alerts.filter(alert => {
+        if (!alert || !alert.id) {
+            return true;
+        }
+
+        if (seenAlertIDs.has(alert.id)) {
+            return false;
+        }
+
+        seenAlertIDs.add(alert.id);
+        return true;
+    });
+}
+
+function getAutotaskTicketSearchKey(companyID, titleStart, deviceName, eventType) {
+    return JSON.stringify({ companyID, titleStart, deviceName, eventType });
+}
+
+async function getCachedAutotaskTickets(context, autotaskAPI, cache, companyID, titleStart, deviceName, eventType) {
+    const cacheKey = getAutotaskTicketSearchKey(companyID, titleStart, deviceName, eventType);
+    if (cache.has(cacheKey)) {
+        return cache.get(cacheKey);
+    }
+
+    const tickets = await searchAutotaskTickets(context, autotaskAPI, companyID, titleStart, deviceName, eventType);
+    if (tickets !== undefined) {
+        cache.set(cacheKey, tickets);
+    }
+
+    return tickets;
 }
 
 function getKeyByValue(object, value) {
@@ -1388,5 +1441,7 @@ module.exports = {
     shouldRunClosedAlertsCheck,
     isFreshAutotaskLocationCacheEntry,
     isFreshDeviceCacheEntry,
-    getAutotaskDeviceCacheKey
+    getAutotaskDeviceCacheKey,
+    deduplicateAlerts,
+    getAutotaskTicketSearchKey
 };

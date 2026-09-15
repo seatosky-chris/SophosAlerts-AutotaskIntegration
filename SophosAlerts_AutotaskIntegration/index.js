@@ -214,34 +214,6 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 : { devices: {} };
             const ticketSearchCache = new Map();
 
-            var alertTenants = filteredAlerts.map(function(alert) {
-                return alert.customer_id;
-            });
-            alertTenants = [...new Set(alertTenants)];
-
-            let alertDevices = {};
-            for (i = 0; i < alertTenants.length; i++) {
-                var tenantID = alertTenants[i];
-                let sophosTenant = sophosTenants.items.filter(t => t.id == tenantID)[0];
-                let deviceIDs = filteredAlerts.filter(alert => alert.customer_id == tenantID).map(function(alert) {
-                    return alert.data.endpoint_id;
-                });
-
-                var devices = await getCachedSophosDevices(
-                    context,
-                    sophosJWT,
-                    sophosTenant,
-                    deviceIDs,
-                    sophosRateLimiter,
-                    sophosDevicesCache,
-                    sophosDevicesCacheBlobClient,
-                    containerClient
-                );
-                if (devices && devices.items) {
-                    alertDevices[tenantID] = devices.items;
-                }
-            }
-
             for (i = 0; i < filteredAlerts.length; i++) {
                 var alert = filteredAlerts[i];
                 // Go through each alert (that isn't low severity) and create a new ticket in Autotask for it
@@ -312,11 +284,26 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                         );
                     }
 
-                    // Get related device if applicable
-                    var customerDevices = alertDevices[alert.customer_id];
+                    // Get related device only when a new ticket actually needs one.
+                    var customerDevices = [];
+                    var endpointID = alert.data && alert.data.endpoint_id;
+                    var sophosTenant = sophosTenants.items.filter(tenant => tenant.id == alert.customer_id)[0];
+                    if (useAutotaskAPI && sophosTenant && endpointID) {
+                        var devices = await getCachedSophosDevices(
+                            context,
+                            sophosJWT,
+                            sophosTenant,
+                            [endpointID],
+                            sophosRateLimiter,
+                            sophosDevicesCache,
+                            sophosDevicesCacheBlobClient,
+                            containerClient
+                        );
+                        customerDevices = devices && devices.items ? devices.items : [];
+                    }
                     var alertDevice = null;
                     if (customerDevices && customerDevices.length > 0) {
-                        alertDevice = customerDevices.filter(device => device.id == alert.data.endpoint_id)[0];
+                        alertDevice = customerDevices.filter(device => device.id == endpointID)[0];
                     }
                     var deviceID = null;
                     if (useAutotaskAPI && alertDevice) {

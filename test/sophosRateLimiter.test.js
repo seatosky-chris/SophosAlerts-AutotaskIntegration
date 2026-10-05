@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry, isFreshDeviceCacheEntry, getAutotaskDeviceCacheKey, deduplicateAlerts, getAutotaskTicketSearchKey, getAdaptiveSophosRetryMaxAttempts, shouldStopSophosTenantLoop } = require('../SophosAlerts_AutotaskIntegration/index.js');
+const { createSophosRateLimiter, runSophosRequestWithRetry, shouldProcessActionableAlerts, getSophosSiemAlerts, isFreshSophosMetadataCache, shouldRunClosedAlertsCheck, isFreshAutotaskLocationCacheEntry, isFreshDeviceCacheEntry, updateSophosAlertQueryFailureState, getAutotaskDeviceCacheKey, deduplicateAlerts, getAutotaskTicketSearchKey, getAdaptiveSophosRetryMaxAttempts, shouldStopSophosTenantLoop } = require('../SophosAlerts_AutotaskIntegration/index.js');
 
 test('Sophos rate limiter keeps requests at or below 10/sec', async () => {
   const limiter = createSophosRateLimiter({ log: () => {} }, 10);
@@ -105,6 +105,23 @@ test('Device caches expire after 24 hours and Autotask keys include device ident
     getAutotaskDeviceCacheKey(42, deviceDetails),
     getAutotaskDeviceCacheKey(42, { ...deviceDetails, macAddresses: ['AA', 'BB'] })
   );
+});
+
+test('Sophos alert query failures are counted within a rolling 24-hour window', () => {
+  const now = Date.parse('2026-10-05T12:00:00.000Z');
+  let state = null;
+
+  for (let failure = 1; failure <= 4; failure++) {
+    state = updateSophosAlertQueryFailureState(state, now + (failure * 1000));
+    assert.equal(state.failureCount, failure);
+  }
+
+  state = updateSophosAlertQueryFailureState(state, now + 5000);
+  assert.equal(state.failureCount, 5);
+  assert.equal(state.lastFailureAt, new Date(now + 5000).toISOString());
+
+  const expiredState = updateSophosAlertQueryFailureState(state, now + (24 * 60 * 60 * 1000) + 5000);
+  assert.equal(expiredState.failureCount, 1);
 });
 
 test('Alert deduplication keeps distinct alerts and removes repeated IDs', () => {

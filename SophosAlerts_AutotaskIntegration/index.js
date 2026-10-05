@@ -22,6 +22,7 @@ app.timer('SophosAlerts_AutotaskIntegration', {
         const blockBlobClient = containerClient.getBlockBlobClient("lastRun.dat");
         const sophosMetadataCacheBlobClient = containerClient.getBlockBlobClient("sophosMetadata.json");
         const closedAlertsCheckBlobClient = containerClient.getBlockBlobClient("lastClosedAlertsCheck.dat");
+        const sophosAlertQueryFailuresBlobClient = containerClient.getBlockBlobClient("sophosAlertQueryFailures.json");
         const autotaskLocationsCacheBlobClient = containerClient.getBlockBlobClient("autotaskLocations.json");
         const sophosDevicesCacheBlobClient = containerClient.getBlockBlobClient("sophosDevices.json");
         const autotaskDevicesCacheBlobClient = containerClient.getBlockBlobClient("autotaskDevices.json");
@@ -146,8 +147,17 @@ app.timer('SophosAlerts_AutotaskIntegration', {
                 alerts = await getSophosSiemAlerts(context, sophosJWT, sophosTenants, lastRunUnixTimestamp);
                 shouldUpdateLastRunCheckpoint = true;
             } catch (error) {
-                context.error("Sophos alerts query failed; leaving lastRun.dat unchanged so the time window is retried.");
-                context.error(error);
+                const failureState = await recordSophosAlertQueryFailure(
+                    context,
+                    sophosAlertQueryFailuresBlobClient,
+                    containerClient
+                );
+                if (failureState.failureCount > 4) {
+                    context.error("Sophos alerts query failed; leaving lastRun.dat unchanged so the time window is retried.");
+                    context.error(error);
+                } else {
+                    context.warn(`Sophos alert query failure recorded (${failureState.failureCount}/5 in 24 hours; latest ${failureState.lastFailureAt}).`);
+                }
                 return;
             }
 
@@ -726,6 +736,48 @@ function isFreshDeviceCacheEntry(entry, now = Date.now()) {
 
     const cachedAt = Date.parse(entry.cachedAt);
     return Number.isFinite(cachedAt) && cachedAt <= now && now - cachedAt < 24 * 60 * 60 * 1000;
+}
+
+function updateSophosAlertQueryFailureState(state, now = Date.now()) {
+    const cutoff = now - 24 * 60 * 60 * 1000;
+    const failures = Array.isArray(state && state.failures)
+        ? state.failures.filter(timestamp => {
+            const failureTime = Date.parse(timestamp);
+            return Number.isFinite(failureTime) && failureTime > cutoff && failureTime <= now;
+        })
+        : [];
+    const lastFailureAt = new Date(now).toISOString();
+    failures.push(lastFailureAt);
+
+    return {
+        failureCount: failures.length,
+        lastFailureAt,
+        failures
+    };
+}
+
+async function recordSophosAlertQueryFailure(context, blobClient, containerClient, now = Date.now()) {
+    let previousState = null;
+    try {
+        if (await blobClient.exists()) {
+            const downloadResponse = await blobClient.downloadToBuffer();
+            previousState = JSON.parse(downloadResponse.toString("utf-8"));
+        }
+    } catch (error) {
+        context.warn("Could not read Sophos alert query failure state; starting a new 24-hour count: " + error);
+    }
+
+    const failureState = updateSophosAlertQueryFailureState(previousState, now);
+    try {
+        await containerClient.createIfNotExists();
+        await blobClient.uploadData(Buffer.from(JSON.stringify(failureState)), {
+            blobHTTPHeaders: { blobContentType: "application/json" }
+        });
+    } catch (error) {
+        context.warn("Could not persist Sophos alert query failure state: " + error);
+    }
+
+    return failureState;
 }
 
 async function readSophosDevicesCache(context, blobClient) {
@@ -1505,6 +1557,7 @@ module.exports = {
     shouldRunClosedAlertsCheck,
     isFreshAutotaskLocationCacheEntry,
     isFreshDeviceCacheEntry,
+    updateSophosAlertQueryFailureState,
     getAutotaskDeviceCacheKey,
     deduplicateAlerts,
     getAutotaskTicketSearchKey
